@@ -179,6 +179,9 @@ export const POCKET_CAPABILITIES = defineCapabilityRegistry([
   // remain host-owned; the browser dev host, deterministic sim and reference
   // core exercise the contract without granting network access to every host.
   "io.offload",
+  // Host-owned complete-record byte lane to a paired companion. The guest
+  // receives framing, not sockets or a network namespace.
+  "io.relay",
   "io.resource-pack",
   "net.http",
   // SQLite behind the db module's own namespace (`globalThis.db`,

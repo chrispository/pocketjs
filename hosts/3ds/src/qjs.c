@@ -20,6 +20,7 @@
 
 #include "qjs.h"
 #include "offload.h"
+#include "relay.h"
 #include "media.h"
 #include "asset_pack.h"
 #include "state.h"
@@ -57,6 +58,9 @@ typedef enum {
   HostPackSession, HostPackSubmit, HostPackCacheText, HostPackCacheImage, HostPackCachePixels, HostPackRemove, HostPackTake, HostPackUpload, HostPackRelease, HostPackStats,
   HostStateRead, HostStateWrite,
   HostOffloadSession, HostOffloadSubmit, HostOffloadTake, HostOffloadCoverage, HostOffloadImage, HostOffloadReleaseImage,
+#ifdef POCKETJS_RELAY
+  HostRelaySession, HostRelaySend, HostRelayTake, HostRelayStats,
+#endif
   HostCreateNode,
   HostDestroyNode,
   HostInsertBefore,
@@ -688,6 +692,23 @@ static JSValue host_operation(
       size_t length = offload_take(debug_poll_buffer);
       return length ? JS_NewStringLen(ctx, debug_poll_buffer, length) : JS_UNDEFINED;
     }
+#ifdef POCKETJS_RELAY
+    case HostRelaySession: return JS_NewInt32(ctx, relay_session());
+    case HostRelaySend: {
+      const uint8_t *bytes = NULL;
+      size_t length = 0;
+      return JS_NewBool(ctx, argument_bytes(ctx, argc, argv, 0, &bytes, &length) && relay_send(bytes, length));
+    }
+    case HostRelayTake: {
+      const uint8_t *bytes = NULL;
+      size_t capacity = 0;
+      if (!argument_bytes(ctx, argc, argv, 0, &bytes, &capacity)) return JS_NewInt32(ctx, 0);
+      return JS_NewInt32(ctx, (int32_t)relay_take((uint8_t *)bytes, capacity));
+    }
+    case HostRelayStats:
+      relay_stats(debug_poll_buffer, 256);
+      return JS_NewString(ctx, debug_poll_buffer);
+#endif
     case HostDbgShot:
       return JS_NewBool(ctx, devserver_request_screenshot());
     case HostSvcOpen: {
@@ -789,6 +810,16 @@ static void install_host(void) {
   add_operation(offload, "submit", 1, HostOffloadSubmit);
   add_operation(offload, "take", 0, HostOffloadTake);
   JS_SetPropertyStr(context, global, "offload", offload);
+#endif
+#ifdef POCKETJS_RELAY
+  if (relay_available()) {
+    JSValue relay = JS_NewObject(context);
+    add_operation(relay, "session", 0, HostRelaySession);
+    add_operation(relay, "send", 1, HostRelaySend);
+    add_operation(relay, "take", 1, HostRelayTake);
+    add_operation(relay, "stats", 0, HostRelayStats);
+    JS_SetPropertyStr(context, global, "relayChannel", relay);
+  }
 #endif
   JSValue ui = JS_NewObject(context);
 
@@ -1003,6 +1034,9 @@ bool qjs_frame(
 ) {
   if (context == NULL) return false;
   offload_frame();
+#ifdef POCKETJS_RELAY
+  relay_frame();
+#endif
 #ifdef POCKETJS_ASSET_PACK
   asset_pack_frame();
 #endif
@@ -1053,6 +1087,9 @@ void qjs_shutdown(void) {
   media_forget_guest();
 #endif
   offload_reset();
+#ifdef POCKETJS_RELAY
+  relay_reset();
+#endif
 #ifdef POCKETJS_ASSET_PACK
   asset_pack_reset();
 #endif

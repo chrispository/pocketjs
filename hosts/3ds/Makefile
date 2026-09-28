@@ -96,6 +96,13 @@ ifeq ($(POCKETJS_OFFLOAD),1)
 CFLAGS += -DPOCKETJS_OFFLOAD -DPOCKETJS_OFFLOAD_KEY='"sdmc:/pocketjs/offload/$(POCKETJS_OFFLOAD_SLOT).key"'
 endif
 
+ifeq ($(POCKETJS_RELAY),1)
+CFLAGS += -DPOCKETJS_RELAY \
+  -DPOCKETJS_RELAY_KEY='"sdmc:/pocketjs/offload/$(POCKETJS_OFFLOAD_SLOT).key"' \
+  -DPOCKETJS_RELAY_HOST='"sdmc:/pocketjs/relay/$(POCKETJS_OFFLOAD_SLOT).host"'
+RELAY_OBJECTS := $(BUILD)/relay.o
+endif
+
 ifeq ($(POCKETJS_MEDIA),1)
 CFLAGS += -DPOCKETJS_MEDIA
 endif
@@ -117,7 +124,7 @@ LDFLAGS := -specs=3dsx.specs $(ARCH) -Wl,--gc-sections -Wl,-Map,$(BUILD)/pocketj
 LIBPATHS := -L$(DEVKITPRO)/libctru/lib
 LIBS := -lcitro3d -lctru $(ASSET_PACK_LIBS) -lm
 
-OBJECTS := $(BUILD)/main.o $(BUILD)/media.o $(ASSET_PACK_OBJECTS) $(BUILD)/offload.o $(BUILD)/soc.o $(BUILD)/svcwire.o $(BUILD)/runtime.o $(STATE_OBJECTS) $(BUILD)/dev_protocol.o $(BUILD)/devserver.o $(BUILD)/devmenu.o $(BUILD)/gfx.o $(BUILD)/qjs.o $(BUILD)/input.o $(BUILD)/vshader_shbin.o
+OBJECTS := $(BUILD)/main.o $(BUILD)/media.o $(ASSET_PACK_OBJECTS) $(BUILD)/offload.o $(RELAY_OBJECTS) $(BUILD)/soc.o $(BUILD)/svcwire.o $(BUILD)/runtime.o $(STATE_OBJECTS) $(BUILD)/dev_protocol.o $(BUILD)/devserver.o $(BUILD)/devmenu.o $(BUILD)/gfx.o $(BUILD)/qjs.o $(BUILD)/input.o $(BUILD)/vshader_shbin.o
 ELF := $(BUILD)/pocketjs-3ds.elf
 SMDH := $(BUILD)/pocketjs-3ds.smdh
 
@@ -162,7 +169,9 @@ $(BUILD)/%.o: $(SOURCE)/%.c $(BUILD)/vshader_shbin.h $(FLAGS_STAMP) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/offload.o: $(SOURCE)/offload.h $(SOURCE)/offload_queue.h $(SOURCE)/offload_image.h
-$(BUILD)/qjs.o: $(SOURCE)/offload.h $(SOURCE)/offload_coverage.h $(SOURCE)/state.h
+$(BUILD)/relay.o: $(SOURCE)/relay.h $(SOURCE)/soc.h
+$(BUILD)/qjs.o: $(SOURCE)/offload.h $(SOURCE)/relay.h $(SOURCE)/offload_coverage.h $(SOURCE)/state.h
+$(BUILD)/main.o: $(SOURCE)/relay.h
 $(BUILD)/asset_pack.o: $(SOURCE)/asset_pack.h $(SOURCE)/asset_pack_format.h
 $(BUILD)/main.o $(BUILD)/qjs.o: $(SOURCE)/asset_pack.h
 $(BUILD)/state.o: $(SOURCE)/state.h $(SOURCE)/runtime.h

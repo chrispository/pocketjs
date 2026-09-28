@@ -16,7 +16,8 @@
         "io.resource-pack",
         "data.state",
         "data.fs",
-        "io.offload"
+        "io.offload",
+        "io.relay"
       ]
     }
   },

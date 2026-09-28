@@ -759,6 +759,7 @@ export async function build3ds(argv: readonly string[]): Promise<string> {
     POCKETJS_BUILD_DIR: containerPathFor(buildDirectory, mounts),
     POCKETJS_OUT_3DSX: containerPathFor(output, mounts),
     POCKETJS_OFFLOAD: plan.features["io.offload"] ? "1" : "",
+    POCKETJS_RELAY: plan.features["io.relay"] ? "1" : "",
     POCKETJS_MEDIA: plan.features["media.playback"] ? "1" : "",
     POCKETJS_ASSET_PACK: plan.features["io.resource-pack"] ? "1" : "",
     POCKETJS_STATE: plan.features["data.state"] ? "1" : "",

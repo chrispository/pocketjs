@@ -103,6 +103,7 @@ describe("private Nintendo 3DS build profile", () => {
       },
       capabilities: [
         "io.offload",
+        "io.relay",
         "media.playback",
         "io.resource-pack",
         "data.state",
