@@ -300,12 +300,19 @@ links to how it was built.
 | [**Pocket DevTools**](https://pocketjs.dev/blog/time-travel-devtools/) | Time-travel debugging over a USB cable at 2 bytes per frame. The inspector highlight is emitted by the core into the draw list, so it renders on the device, on every backend |
 | [**Pocket Launcher**](./docs/LAUNCHER.md) | Whole-application lifecycle, target admission, frozen shots, and guest switching on PSP and Vita |
 | [**Pocket Pi**](https://github.com/pocket-stack/pocket-pi) | A coding agent running inside the QuickJS guest environment, with no Node underneath |
+| [**Primary Light**](./apps/mv) | A 64-second promotional music video that is a PocketJS application. The core draws all 3,840 frames at 480x272 on the 60 Hz tick, and the soundtrack is synthesized from oscillators in the repository |
 
 <p align="center">
   <a href="https://github.com/pocket-stack/pocket-voxel"><img src="./site/assets/blog/voxel-psp-pallet-town.png" width="720" alt="Pocket Voxel on a real PSP: Pallet Town as a voxel diorama with gabled roofs, carved bushes, flowers, an NPC and the player on the path, in per-tile color." /></a>
 </p>
 
 <p align="center"><em>Pocket Voxel, captured on a PSP-2000: the flat Game Boy world standing up as geometry. <a href="https://pocketjs.dev/blog/pocket-voxel/">The making-of story</a>.</em></p>
+
+<p align="center">
+  <a href="./site/assets/pocketjs-mv.mp4"><img src="./site/assets/pocketjs-mv.jpg" width="720" alt="The PocketJS wordmark in white with red, green and blue chromatic fringes, over three colored rules on near-black, captioned A PORTABLE APPLICATION RUNTIME." /></a>
+</p>
+
+<p align="center"><em>Primary Light: red, green and blue are the three framework adapters and a display's three primaries, and the video converges them the way the build does. <code>bun site/record-mv.ts</code> replays <a href="./apps/mv">apps/mv</a> headlessly and encodes <a href="./site/assets/pocketjs-mv.mp4">the file</a>; nothing is captured off a screen.</em></p>
 
 ## Getting started
 

@@ -30,6 +30,7 @@ export const REGISTRY: readonly RegistryApp[] = [
   { output: "motions-main", id: "dev.pocket-stack.motions", title: "PocketJS: Motion Lab (yui540 studies on baked keyframe timelines)", cover: "covers/cover-motions-main.png", refl: "covers/refl-motions-main.png" },
   { output: "notifications-main", id: "dev.pocket-stack.notifications", title: "PocketJS: Notifications", cover: "covers/cover-notifications-main.png", refl: "covers/refl-notifications-main.png" },
   { output: "music-main", id: "dev.pocket-stack.music", title: "PocketJS: Now Playing", cover: "covers/cover-music-main.png", refl: "covers/refl-music-main.png" },
+  { output: "mv-main", id: "dev.pocket-stack.mv", title: "PocketJS: Primary Light (MV)", cover: "covers/cover-mv-main.png", refl: "covers/refl-mv-main.png" },
   { output: "settings-main", id: "dev.pocket-stack.settings", title: "PocketJS: Settings", cover: "covers/cover-settings-main.png", refl: "covers/refl-settings-main.png" },
   { output: "solid-aot-lab-main", id: "dev.pocket-stack.solid.aot.lab", title: "PocketJS: Solid AOT Feature Lab", cover: "covers/cover-solid-aot-lab-main.png", refl: "covers/refl-solid-aot-lab-main.png" },
   { output: "im-main", id: "dev.pocket-stack.im", title: "PocketJS: Talk", cover: "covers/cover-im-main.png", refl: "covers/refl-im-main.png" },

@@ -486,6 +486,13 @@
 .handheld-stage figcaption p{color:var(--ink-2);font-size:.85rem;line-height:1.65;max-width:34em;min-height:3.3em}
 .handheld-stage .pg-stage__viewport{height:420px;aspect-ratio:auto}
 @media(max-width:760px){.handheld-grid{grid-template-columns:1fr;gap:2.5rem}.handheld-stage .pg-stage__viewport{height:380px}}
+/* "Primary Light" (apps/mv): a plain video element framed like the panels
+   around it. No stage JS to boot — the file already IS the engine's output, so
+   its hint is visible from first paint rather than waiting on an is-ready flag. */
+.mv-figure{margin:0;min-width:0}
+.mv-figure video{display:block;width:100%;height:auto;aspect-ratio:1920/1088;background:#05070d;
+  border:1px solid var(--line);border-radius:14px}
+.mv-figure .stage-hint{opacity:1;text-align:left}
 .spon-cta{margin-top:1.4rem;display:inline-flex;gap:.5rem;align-items:center}
 
 /* The hero pairs the handhelds beside the heading and above the case strip. */

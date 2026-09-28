@@ -542,6 +542,7 @@ describe("semantic resolution", () => {
       library: [true, true, false, true],
       motions: [true, true, false, true],
       music: [true, true, false, true],
+      mv: [true, true, false, true],
       "text-cjk": [true, false, false, false],
       note: [false, false, true, true],
       notifications: [true, true, false, true],

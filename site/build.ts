@@ -637,6 +637,10 @@ async function main() {
   // The hero demo wall + its poster frame (baked by site/bake-demo-wall.ts).
   copy(SITE + "assets/pocketjs-demo-wall.mp4", "assets/pocketjs-demo-wall.mp4");
   copy(SITE + "assets/pocketjs-demo-wall.jpg", "assets/pocketjs-demo-wall.jpg");
+  // "Primary Light" + its poster frame (rendered by site/record-mv.ts from
+  // apps/mv — the engine draws the video, ffmpeg only encodes it).
+  copy(SITE + "assets/pocketjs-mv.mp4", "assets/pocketjs-mv.mp4");
+  copy(SITE + "assets/pocketjs-mv.jpg", "assets/pocketjs-mv.jpg");
   // Blog illustration loops (animated GIFs rendered by the engine itself).
   if (existsSync(SITE + "assets/blog/")) {
     for (const f of readdirSync(SITE + "assets/blog/")) copy(SITE + "assets/blog/" + f, "assets/blog/" + f);

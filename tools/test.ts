@@ -287,6 +287,12 @@ const SUITE: readonly Stage[] = [
     tests: ["tests/audio-sim.test.ts"],
   },
   {
+    name: "mv sim",
+    prep: [["bun", "tools/build.ts", "mv-main"]],
+    browser: true,
+    tests: ["tests/mv-sim.test.ts"],
+  },
+  {
     name: "launcher sim",
     prep: [["bun", "tools/launcher.ts", "covers"]],
     browser: true,

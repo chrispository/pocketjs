@@ -1,0 +1,33 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "dev.pocket-stack.mv",
+  "name": "pocketjs-mv",
+  "title": "PocketJS: Primary Light (MV)",
+  "version": "0.13.0",
+  "engine": {
+    "capabilities": {
+      "requires": [
+        "text.glyphs.baked",
+        "input.buttons"
+      ],
+      "enhances": [
+        "audio.pcm"
+      ]
+    }
+  },
+  "app": {
+    "entry": "apps/mv/main.tsx",
+    "output": "mv-main",
+    "framework": "solid",
+    "viewport": {
+      "fixed": {
+        "logical": [
+          480,
+          272
+        ],
+        "presentation": "integer-fit"
+      }
+    }
+  }
+}

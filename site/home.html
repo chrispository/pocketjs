@@ -234,6 +234,28 @@
   </div>
 </section>
 
+<section class="sect" id="mv">
+  <div class="wrap">
+    <div class="shead">
+      <span class="vwrap"><span class="verb spectrum lit">Primary Light</span><span class="vrail"></span></span>
+      <span class="fill"></span>
+    </div>
+    <div class="cols" style="grid-template-columns:minmax(0,1fr) minmax(0,1.35fr)">
+      <p class="slede" style="margin-bottom:0">A 64-second music video for PocketJS that is <b>itself a PocketJS
+        application</b>. The same Rust core behind every demo on this page draws each of its 3,840 frames at
+        480x272, and the soundtrack is synthesized from oscillators in the repository and streamed through the
+        audio module. <code>bun site/record-mv.ts</code> replays <code>apps/mv</code> headlessly and encodes the
+        file. Nothing is captured off a screen.</p>
+      <figure class="mv-figure">
+        <video src="/assets/pocketjs-mv.mp4" poster="/assets/pocketjs-mv.jpg"
+               controls playsinline preload="none"
+               aria-label="Primary Light, a music video rendered by the PocketJS engine"></video>
+        <figcaption class="stage-hint">Best with sound. Red, green and blue are the three framework adapters, and a display's three primaries.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
 <section class="sect" id="measured">
   <div class="wrap">
     <div class="shead">
