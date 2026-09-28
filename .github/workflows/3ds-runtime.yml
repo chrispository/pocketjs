@@ -17,5 +17,5 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
-      - run: bun test tests/3ds-profile.test.ts tests/3ds-runtime-state.test.ts tests/3ds-runtime-wire.test.ts tests/3ds-soc.test.ts tests/native-source.test.ts tests/blackberry-classic.test.ts tests/media.test.ts tests/media-service.test.ts tests/service-client.test.ts
+      - run: bun test tests/3ds-profile.test.ts tests/3ds-relay.test.ts tests/3ds-runtime-state.test.ts tests/3ds-runtime-wire.test.ts tests/3ds-soc.test.ts tests/native-source.test.ts tests/blackberry-classic.test.ts tests/media.test.ts tests/media-service.test.ts tests/service-client.test.ts
       - run: bun test --conditions=browser tests/offload.test.ts tests/offload-images.test.ts tests/offload-provider.test.ts tests/resource-cache.test.ts tests/resource-view.test.ts tests/resource-pack.test.ts tests/resource-pack-view.test.ts

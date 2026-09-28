@@ -13,7 +13,7 @@ test("the 3DS native Relay worker pairs, frames and reconnects over TCP", async 
       "-fsanitize=address,undefined", "-Itests/fixtures/offload-native",
       `-DPOCKETJS_RELAY_KEY="${join(directory, "pairing.key")}"`,
       `-DPOCKETJS_RELAY_HOST="${join(directory, "device.host")}"`,
-      "tests/fixtures/relay-native/main.c", "hosts/3ds/src/relay.c", "-o", binary,
+      "tests/fixtures/3ds-relay-native/main.c", "hosts/3ds/src/relay.c", "-o", binary,
     ]);
     if (compile.exitCode) throw new Error(compile.stderr.toString());
     child = Bun.spawn([binary], { stdout: "pipe", stderr: "pipe" });
