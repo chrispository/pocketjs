@@ -26,8 +26,18 @@ interface Pending { image: boolean; callback(result: OffloadResult): void; cance
 export function createRelayMangaClient(options: {
   transport: RelayTransportAdapter; rxLimits?: RelayRxLimits; scheduler?: RelayScheduler;
   randomBytes?: RelayRandomBytes; upload?: (image: Image) => number;
+  inflate?: (compressed: Uint8Array, width: number, height: number) => Uint8Array;
 }) {
   const limits = options.rxLimits ?? mangaRelayLimits(), clock = frameScheduler();
+  const nativeInflate = (globalThis as unknown as { resourcePacks?: {
+    inflatePixels?(compressed: Uint8Array, width: number, height: number): ArrayBuffer | undefined;
+  } }).resourcePacks?.inflatePixels;
+  const inflate = options.inflate ?? (nativeInflate
+    ? (compressed: Uint8Array, width: number, height: number) => {
+      const pixels = nativeInflate(compressed, width, height);
+      if (!pixels) throw Error("Manga image decompression failed");
+      return new Uint8Array(pixels);
+    } : undefined);
   const streams = new Map<string, number>(), binding = new Set<string>(), refused = new Map<string, string>();
   const held = new Map<string, { raw: string; revision: string }>(), staging = new Map<number, Image>();
   const pending = new Map<number, Pending>();
@@ -121,7 +131,9 @@ export function createRelayMangaClient(options: {
     }
     const key = JSON.stringify(ref), previous = held.get(key);
     if (previous) { held.delete(key); held.set(key, previous); }
-    const started = endpoint.get(stream, ref!, { accept: [image ? RELAY_CODEC.R5G6B5LE : RELAY_CODEC.JSON], maxObjectBytes: image ? MAX_IMAGE_BYTES : MAX_TEXT_BYTES,
+    const started = endpoint.get(stream, ref!, { accept: image
+      ? (inflate ? [RELAY_CODEC.OPAQUE_BYTES, RELAY_CODEC.R5G6B5LE] : [RELAY_CODEC.R5G6B5LE])
+      : [RELAY_CODEC.JSON], maxObjectBytes: image ? MAX_IMAGE_BYTES : MAX_TEXT_BYTES,
       ...(!image && previous ? { ifRevision: previous.revision } : {}) }, result => {
       if (!pending.has(id)) return;
       if (!result.ok) { finish(id, { ok: false, error: String((result.error as { message?: string; code?: string }).message ?? (result.error as { code?: string }).code ?? result.error) }); return; }
@@ -134,10 +146,14 @@ export function createRelayMangaClient(options: {
           finish(id, { ok: true, value: previous.raw }); return;
         }
         if (image) {
-          const { width, height } = object.value as { width: number; height: number };
-          if (![width, height].every(n => Number.isInteger(n) && n >= 16 && n <= 256 && !(n & (n - 1))) || object.data.length !== width * height * 2)
+          const { width, height, compression } = object.value as { width: number; height: number; compression?: string };
+          if (![width, height].every(n => Number.isInteger(n) && n >= 16 && n <= 256 && !(n & (n - 1))))
             throw Error("Invalid manga image envelope");
-          ticket = nextToken++; staging.set(ticket, { pixels: object.data, width, height });
+          const pixels = object.codec === RELAY_CODEC.OPAQUE_BYTES && compression === "zlib-rgb565-v1" && inflate
+            ? inflate(object.data, width, height)
+            : object.codec === RELAY_CODEC.R5G6B5LE ? object.data : undefined;
+          if (!pixels || pixels.length !== width * height * 2) throw Error("Invalid manga image pixels");
+          ticket = nextToken++; staging.set(ticket, { pixels, width, height });
           finish(id, { ok: true, value: JSON.stringify({ token: ticket, width, height }) });
         } else {
           const decoded = parseRelayJson(object.data);

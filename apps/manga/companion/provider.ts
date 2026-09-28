@@ -4,18 +4,75 @@ import { boundedCache } from "../cache.ts";
 import { MangaStore } from "./store.ts";
 import { parseProgress } from "../progress.ts";
 import type { OffloadImage } from "../../../contracts/spec/offload.ts";
+import { deflateSync } from "node:zlib";
+import { documentHead } from "../document.ts";
+import { parseSeries, pickLevel, tilesPerPage, windowTiles, type SeriesMeta } from "../model.ts";
 
-export interface MangaResource { revision: string; payload?: string; image?: OffloadImage; notModified?: boolean }
-export function mangaMethods(root: string, budget = { maxEntries: 256, maxBytes: 8 * 1024 * 1024 }) {
+export interface MangaResource { revision: string; payload?: string; image?: OffloadImage;
+  compressed?: { pixels: Uint8Array; width: number; height: number }; notModified?: boolean }
+export function mangaMethods(root: string, budget = { maxEntries: 512, maxBytes: 32 * 1024 * 1024 }) {
   const store = new MangaStore(root);
   const cache = boundedCache<string, { signature: string; resource: MangaResource }>(budget.maxEntries, budget.maxBytes);
   let reads = 0, conversions = 0;
+  const metas = new Map<string, { signature: string; meta: SeriesMeta }>();
+  const warmQueue: string[] = [], warmKeys = new Set<string>();
+  let warmTimer: ReturnType<typeof setTimeout> | undefined, closed = false, warming = false;
+  let warmed = 0, warmFailures = 0;
+  function metaFor(pack: string): SeriesMeta | undefined {
+    try {
+      const signature = packSignature(root, pack), held = metas.get(pack);
+      if (held?.signature === signature) return held.meta;
+      if (held) {
+        metas.delete(pack);
+        warmQueue.splice(0, warmQueue.length, ...warmQueue.filter(key => !key.startsWith(`${pack}/`)));
+        for (const key of warmKeys) if (key.startsWith(`${pack}/`)) warmKeys.delete(key);
+      }
+      const first = readPack(root, pack, 0).bytes.toString("utf8"), head = documentHead(first);
+      const raw = head ? Array.from({ length: head.count }, (_, n) =>
+        JSON.parse(readPack(root, pack, head.start + n).bytes.toString("utf8")) as string).join("") : first;
+      const meta = parseSeries(JSON.parse(raw));
+      if (meta) metas.set(pack, { signature, meta });
+      return meta;
+    } catch { return undefined; }
+  }
+  function warmNext() {
+    warmTimer = undefined;
+    if (closed) return;
+    const payload = warmQueue.shift();
+    if (payload) {
+      warming = true;
+      try { resource("manga.image-z", payload); warmed++; }
+      catch { warmFailures++; }
+      finally { warmKeys.delete(payload); warming = false; }
+    }
+    if (warmQueue.length) warmTimer = setTimeout(warmNext, 15);
+  }
+  function warmPages(pack: string, firstPage: number) {
+    const meta = metaFor(pack);
+    if (!meta) return;
+    const fitHeight = 240 * meta.pageW / 400;
+    const queue = (page: number, level: number) => {
+      const tiles = windowTiles(meta, page, level, 0, 0, meta.pageW, fitHeight, 0);
+      for (const tile of tiles.slice(0, 6)) {
+        const payload = `${tile.pack}/${tile.entry}`;
+        const cached = cache.get(`manga.image:${payload}`);
+        if (cached?.signature === metas.get(pack)?.signature || warmKeys.has(payload)) continue;
+        if (warmQueue.length < 32) { warmKeys.add(payload); warmQueue.push(payload); }
+      }
+    };
+    const detail = pickLevel(meta, 400 / meta.pageW);
+    queue(firstPage, 0);
+    if (detail > 0) queue(firstPage, detail);
+    for (let page = firstPage + 1; page < Math.min(meta.pages, firstPage + 4); page++) queue(page, 0);
+    if (detail > 0 && firstPage + 1 < meta.pages) queue(firstPage + 1, detail);
+    if (warmQueue.length && !warmTimer) warmTimer = setTimeout(warmNext, 15);
+  }
   const resource = (method: string, payload: string, ifRevision?: string): MangaResource => {
-    const describe = method === "manga.describe", image = method === "manga.image";
+    const describe = method === "manga.describe", compressed = method === "manga.image-z", image = compressed || method === "manga.image";
     if (!describe && !image && method !== "manga.read") throw Error("Unknown manga resource");
     const [pack, entry, extra] = payload.split("/");
     if (!pack || (describe ? entry !== undefined : extra !== undefined || !/^(0|[1-9][0-9]{0,4})$/.test(entry ?? ""))) throw Error("Invalid pack address");
-    const key = `${method}:${payload}`;
+    const key = `${image ? "manga.image" : method}:${payload}`;
     let current: string;
     try { current = packSignature(root, pack); }
     catch (error) { cache.delete(key); throw error; }
@@ -28,13 +85,31 @@ export function mangaMethods(root: string, budget = { maxEntries: 256, maxBytes:
       const revision = `file-${identity(record.signature)}`;
       if (image) { result = { revision, image: packImage(record) }; conversions++; }
       else result = { revision, payload: describe ? JSON.stringify({ count: record.count }) : record.bytes.toString("utf8") };
-      cache.set(key, { signature: record.signature, resource: result },
-        (result.image?.pixels.length ?? Buffer.byteLength(result.payload!)) + key.length * 2 + record.signature.length * 2 + 256);
+    }
+    if (compressed && result.image && !result.compressed) {
+      const { pixels, width, height } = result.image;
+      const packed = deflateSync(pixels, { level: 1 });
+      if (packed.length < pixels.length) result.compressed = { pixels: packed, width, height };
+    }
+    cache.set(key, { signature: current, resource: result },
+      (result.image?.pixels.length ?? Buffer.byteLength(result.payload!)) + (result.compressed?.pixels.length ?? 0) + key.length * 2 + current.length * 2 + 256);
+    if (!warming && pack !== "manga-index") {
+      if (method === "manga.read" && entry === "0") warmPages(pack, 0);
+      else if (image) {
+        const meta = metaFor(pack), index = Number(entry);
+        if (meta && index >= 2) {
+          const page = Math.floor((index - 2) / tilesPerPage(meta));
+          if (page + 1 < meta.pages) warmPages(pack, page + 1);
+        }
+      }
     }
     // Cached records were validated before insertion; unchanged stat identity
     // permits revalidation without inflation, pixel conversion or image IPC.
     if (ifRevision === result.revision) return { revision: result.revision, notModified: true };
-    return result.image ? { ...result, image: { ...result.image, pixels: result.image.pixels.slice() } } : { ...result };
+    if (compressed && result.compressed) return { revision: result.revision,
+      compressed: { ...result.compressed, pixels: result.compressed.pixels.slice() } };
+    return result.image ? { revision: result.revision, image: { ...result.image, pixels: result.image.pixels.slice() } }
+      : { revision: result.revision, payload: result.payload };
   };
   const writeProgress = (value: any): string => {
     if (typeof value.device !== "string" || !/^[a-z0-9-]{1,64}$/.test(value.device) ||
@@ -49,7 +124,8 @@ export function mangaMethods(root: string, budget = { maxEntries: 256, maxBytes:
       store.db.query("INSERT OR REPLACE INTO progress VALUES(?,?,?)").run(value.device, value.slug, JSON.stringify(progress));
     return JSON.stringify({ saved: progress.updated });
   };
-  return { resource, cacheStats: () => ({ ...cache.stats(), reads, conversions }), close: () => { cache.clear(); store.close(); }, methods: {
+  return { resource, cacheStats: () => ({ ...cache.stats(), reads, conversions, warmed, warmFailures, warmPending: warmQueue.length }),
+    close: () => { closed = true; if (warmTimer) clearTimeout(warmTimer); warmQueue.length = 0; cache.clear(); store.close(); }, methods: {
     "manga.read": (payload: string): string => resource("manga.read", payload).payload!,
     "manga.image": (payload: string): OffloadImage => resource("manga.image", payload).image!,
     "manga.describe": (payload: string): string => resource("manga.describe", payload).payload!,

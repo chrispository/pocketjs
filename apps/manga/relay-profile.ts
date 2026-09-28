@@ -4,7 +4,7 @@ import type { RelayPrivateOp } from "../../framework/src/relay/private-op.ts";
 
 export const MANGA_RELAY = {
   app: "pocket-manga", profile: { name: "manga.library", version: 1 },
-  codecs: [RELAY_CODEC.NONE, RELAY_CODEC.JSON, RELAY_CODEC.R5G6B5LE],
+  codecs: [RELAY_CODEC.NONE, RELAY_CODEC.JSON, RELAY_CODEC.R5G6B5LE, RELAY_CODEC.OPAQUE_BYTES],
   kinds: [RELAY_KIND.FILE, RELAY_KIND.TEXTURE, RELAY_KIND.EVENT],
   port: RELAY_CHANNEL.port,
 };

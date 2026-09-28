@@ -4,6 +4,7 @@ import { createConnection } from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { inflateSync } from "node:zlib";
 import { MangaStore } from "../apps/manga/companion/store.ts";
 import { serveMangaRelay } from "../apps/manga/companion/relay.ts";
 import { dispatchManga } from "../apps/manga/companion/backend.ts";
@@ -18,13 +19,18 @@ import type { OffloadResult } from "../framework/src/offload.ts";
 const key = "31".repeat(32);
 const summary = { slug: "book", title: "漫画 😀", pages: 1, direction: "rtl" as const, pack: "mg-test" };
 const meta = { ...summary, pageW: 256, pageH: 256, levels: [{ scale: 0.5, cols: 1, rows: 1 }] };
-function library() {
+function library(pages = 1, detail = false) {
   const root = mkdtempSync(join(tmpdir(), "manga-protocol-")), store = new MangaStore(root);
   const pixels = Uint8Array.from({ length: 256 * 256 * 2 }, (_, n) => (n * 131 + 17) & 255);
-  const pack = createResourcePack(join(root, "packs", "mg-test.prp"), 3);
-  pack.add(Buffer.from(JSON.stringify(meta)));
+  const pack = createResourcePack(join(root, "packs", "mg-test.prp"), 2 + pages * (detail ? 2 : 1));
+  pack.add(Buffer.from(JSON.stringify({ ...meta, pages, levels: detail
+    ? [{ scale: 0.5, cols: 1, rows: 1 }, { scale: 1, cols: 1, rows: 1 }] : meta.levels })));
   pack.add(prepareTiledRGB565(pixels.slice(0, 128 * 128 * 2), 128, 128), { width: 128, height: 128 });
-  pack.add(prepareTiledRGB565(pixels, 256, 256), { width: 256, height: 256 }); pack.finish(); store.publish(summary);
+  for (let page = 0; page < pages; page++) {
+    if (detail) pack.add(prepareTiledRGB565(pixels.slice(0, 128 * 128 * 2), 128, 128), { width: 128, height: 128 });
+    pack.add(prepareTiledRGB565(pixels, 256, 256), { width: 256, height: 256 });
+  }
+  pack.finish(); store.publish({ ...summary, pages });
   return { root, store, pixels, close() { store.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 async function until(predicate: () => boolean, tick: () => void = () => {}) {
@@ -32,11 +38,11 @@ async function until(predicate: () => boolean, tick: () => void = () => {}) {
   while (!predicate() && Date.now() < deadline) { tick(); await Bun.sleep(2); }
   expect(predicate()).toBe(true);
 }
-async function attach(port: number) {
+async function attach(port: number, inflate?: (compressed: Uint8Array, width: number, height: number) => Uint8Array) {
   const socket = createConnection({ host: "127.0.0.1", port }); await once(socket, "connect");
   const channel = relaySocketChannel(socket, { id: "companion", grants: [MANGA_RELAY.app] });
   const client = createRelayMangaClient({ rxLimits: mangaRelayLimits(true),
-    transport: { peer: channel.peer, trySend: bytes => channel.closed ? "offline" : channel.send(bytes) ? "accepted" : "busy" }, upload: () => 123 });
+    transport: { peer: channel.peer, trySend: bytes => channel.closed ? "offline" : channel.send(bytes) ? "accepted" : "busy" }, upload: () => 123, inflate });
   const binding = attachRelayChannel({ handleRecord: client.handleRecord, handleDisconnect: client.disconnect, close: client.close, flush: client.step }, channel, { maxWireBytes: mangaRelayLimits(true).maxWireBytes });
   // A split authentication prefix followed by HELLO exercises the L0 handoff.
   socket.write(key.slice(0, 11)); socket.write(key.slice(11)); client.connect();
@@ -76,6 +82,43 @@ test("paired TCP Relay reads chunks through the worker, revalidates metadata and
     expect(client.endpoint.protocolErrors).toBe(0);
   } finally { link.close(); await server.close(); f.close(); }
 }, 15000);
+
+test("paired Relay sends compressed pixels to hosts that can inflate them", async () => {
+  const f = library(), server = await serveMangaRelay({ root: f.root, key, port: 0 });
+  let inflations = 0;
+  const link = await attach(server.port, (data) => { inflations++; return new Uint8Array(inflateSync(data)); });
+  try {
+    const ticket = await request(link.client, "manga.image", "mg-test/2", true);
+    expect(link.client.pixels(ticket).pixels).toEqual(f.pixels);
+    expect(inflations).toBe(1);
+    expect(link.client.endpoint.protocolErrors).toBe(0);
+    link.client.releaseImage(ticket);
+  } finally { link.close(); await server.close(); f.close(); }
+}, 15000);
+
+test("opening a series warms compressed previews for the next three pages", async () => {
+  const f = library(3), service = mangaMethods(f.root);
+  try {
+    service.resource("manga.read", "mg-test/0");
+    await until(() => service.cacheStats().warmed === 3);
+    const before = service.cacheStats().conversions;
+    for (const entry of [2, 3, 4]) expect(service.resource("manga.image-z", `mg-test/${entry}`).compressed?.pixels.length).toBeGreaterThan(0);
+    expect(service.cacheStats().conversions).toBe(before);
+    expect(service.cacheStats().warmFailures).toBe(0);
+  } finally { service.close(); f.close(); }
+});
+
+test("companion prepares current detail and next-page preview and detail before Relay requests", async () => {
+  const f = library(2, true), service = mangaMethods(f.root);
+  try {
+    service.resource("manga.read", "mg-test/0");
+    await until(() => service.cacheStats().warmed === 4);
+    const before = service.cacheStats().conversions;
+    for (const entry of [2, 3, 4, 5])
+      expect(service.resource("manga.image-z", `mg-test/${entry}`).compressed?.pixels.length).toBeGreaterThan(0);
+    expect(service.cacheStats().conversions).toBe(before);
+  } finally { service.close(); f.close(); }
+});
 
 test("Relay download and progress leave a complete library readable with only the terminal", async () => {
   const f = library(), server = await serveMangaRelay({ root: f.root, key, port: 0, pollMs: 60000, log: console.error });

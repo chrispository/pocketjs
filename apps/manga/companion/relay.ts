@@ -78,7 +78,10 @@ export class MangaRelayAuthority {
     this.stats.gets++;
     const catalog = ref.ns === CATALOG_NS ? this.catalog : undefined;
     const ifRevision = (request.metadata.args as { ifRevision?: string }).ifRevision;
-    const reply: MangaReply = catalog ? { payload: catalog.payload } : await this.call(read.method, read.payload, ifRevision);
+    const accepts = (request.metadata.args as { accept?: number[] }).accept;
+    const compressed = read.image && accepts?.includes(RELAY_CODEC.OPAQUE_BYTES);
+    const reply: MangaReply = catalog ? { payload: catalog.payload }
+      : await this.call(compressed ? "manga.image-z" : read.method, read.payload, ifRevision);
     const revision = catalog?.revision ?? reply.revision ?? ref.key.split("/")[0]!;
     if (c.closed || endpoint.session.sessionId !== request.session) return;
     if (request.cancelRequested()) {
@@ -90,7 +93,11 @@ export class MangaRelayAuthority {
       endpoint.replyNotModified(request, stamped); this.stats.notModified++; return;
     }
     let sent;
-    if (read.image && reply.image?.format === "r5g6b5") {
+    if (read.image && reply.compressed) {
+      const { pixels, width, height } = reply.compressed;
+      sent = endpoint.replyObject(request, { ref: stamped, codec: RELAY_CODEC.OPAQUE_BYTES,
+        data: pixels, value: { width, height, compression: "zlib-rgb565-v1" } });
+    } else if (read.image && reply.image?.format === "r5g6b5") {
       const { pixels, width, height } = reply.image;
       sent = endpoint.replyObject(request, { ref: stamped, codec: RELAY_CODEC.R5G6B5LE, data: pixels, value: { width, height } });
     } else if (!read.image && typeof reply.payload === "string") {

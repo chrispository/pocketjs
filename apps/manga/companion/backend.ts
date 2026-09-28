@@ -3,11 +3,13 @@ import { RELAY_ERROR } from "@pocketjs/framework/relay/spec";
 import type { OffloadImage } from "../../../contracts/spec/offload.ts";
 import { mangaMethods } from "./provider.ts";
 
-export interface MangaReply { payload?: string; image?: OffloadImage; revision?: string; notModified?: boolean; error?: { code: string; message: string } }
+export interface MangaReply { payload?: string; image?: OffloadImage;
+  compressed?: { pixels: Uint8Array; width: number; height: number };
+  revision?: string; notModified?: boolean; error?: { code: string; message: string } }
 export interface MangaBackend { call(method: string, payload: string, ifRevision?: string): Promise<MangaReply>; close(): void | Promise<void> }
 export function dispatchManga(service: ReturnType<typeof mangaMethods>, method: string, payload: string, ifRevision?: string): MangaReply {
   try {
-    if (["manga.read", "manga.describe", "manga.image"].includes(method)) return service.resource(method, payload, ifRevision);
+    if (["manga.read", "manga.describe", "manga.image", "manga.image-z"].includes(method)) return service.resource(method, payload, ifRevision);
     if (!Object.hasOwn(service.methods, method)) return { error: { code: RELAY_ERROR.UNSUPPORTED, message: "Unknown manga operation" } };
     const result = service.methods[method as keyof typeof service.methods](payload);
     return typeof result === "string" ? { payload: result } : { image: result };

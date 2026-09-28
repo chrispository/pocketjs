@@ -28,6 +28,9 @@
 
 #include <stdlib.h>
 #include <string.h>
+#ifdef POCKETJS_ASSET_PACK
+#include <zlib.h>
+#endif
 
 #include "devserver.h"
 #include "pocket_core.h"
@@ -55,7 +58,7 @@
 
 typedef enum {
   HostMediaOpen, HostMediaClose, HostMediaPaused, HostMediaVolume, HostMediaTexture, HostMediaStatus,
-  HostPackSession, HostPackSubmit, HostPackCacheText, HostPackCacheImage, HostPackCachePixels, HostPackRemove, HostPackTake, HostPackUpload, HostPackRelease, HostPackStats,
+  HostPackSession, HostPackSubmit, HostPackCacheText, HostPackCacheImage, HostPackCachePixels, HostPackInflatePixels, HostPackRemove, HostPackTake, HostPackUpload, HostPackRelease, HostPackStats,
   HostStateRead, HostStateWrite,
   HostOffloadSession, HostOffloadSubmit, HostOffloadTake, HostOffloadCoverage, HostOffloadImage, HostOffloadReleaseImage,
 #ifdef POCKETJS_RELAY
@@ -583,6 +586,25 @@ static JSValue host_operation(
       if (pack) JS_FreeCString(ctx, pack);
       return JS_NewBool(ctx, ok);
     }
+#ifdef POCKETJS_ASSET_PACK
+    case HostPackInflatePixels: {
+      unsigned width = (unsigned)argument_int(ctx, argc, argv, 1);
+      unsigned height = (unsigned)argument_int(ctx, argc, argv, 2);
+      if (argc < 3 || width < 16 || width > 256 || (width & (width - 1)) ||
+          height < 16 || height > 256 || (height & (height - 1)) ||
+          !argument_bytes(ctx, argc, argv, 0, &bytes, &byte_length) ||
+          byte_length == 0 || byte_length > 131200) return JS_UNDEFINED;
+      size_t length = (size_t)width * height * 2;
+      uint8_t *pixels = malloc(length);
+      if (!pixels) return JS_UNDEFINED;
+      uLongf decoded = (uLongf)length;
+      int status = uncompress(pixels, &decoded, bytes, (uLong)byte_length);
+      JSValue result = status == Z_OK && decoded == length
+        ? JS_NewArrayBufferCopy(ctx, pixels, length) : JS_UNDEFINED;
+      free(pixels);
+      return result;
+    }
+#endif
     case HostPackTake: {
       AssetPackResult result;
       if (!asset_pack_take(&result))
@@ -789,6 +811,7 @@ static void install_host(void) {
   add_operation(packs,"cacheText",4,HostPackCacheText);
   add_operation(packs,"cacheImage",4,HostPackCacheImage);
   add_operation(packs,"cachePixels",6,HostPackCachePixels);
+  add_operation(packs,"inflatePixels",3,HostPackInflatePixels);
   add_operation(packs,"take",0,HostPackTake);
   add_operation(packs,"uploadImage",1,HostPackUpload);
   add_operation(packs,"releaseImage",1,HostPackRelease);
