@@ -6,11 +6,11 @@
 // attached and detached imperatively, and each frame writes only the world's
 // translateX/translateY/scale through hot.prop (paint-only, no relayout).
 //
-// Two worlds are stacked: the coarse fit level (level 0) is mounted whole and
-// pinned as an overview, so a tile that has not streamed in yet shows its
-// low-res self instead of a hole; the level matching the camera zoom is
-// streamed above it. Tile demand order is overview first, then the visible
-// window (docs/POCKET_MANGA.md §14.3). Motion runs through the shared
+// Two worlds are stacked: the coarse fit level (level 0) covers the visible
+// viewport as an overview, so a sharp tile still loading shows its low-res
+// counterpart; the level matching the camera zoom is streamed above it.
+// Tile demand order is overview first, then the visible sharp window.
+// Motion runs through the shared
 // createPageCamera so pan inertia and the zoom tween match the tile viewer.
 
 import { onCleanup, type JSX as SolidJSX } from "solid-js";
@@ -250,16 +250,19 @@ export function PageViewer(props: PageViewerProps): SolidJSX.Element {
     }
 
     // The visible document rectangle drives the active level's tile window.
-    // Level 0 is mounted whole as the overview, so it needs no window.
+    // Keep the overview focused on the camera viewport.
     const halfW = props.width / 2 / scale;
     const halfH = props.height / 2 / scale;
-    const overviewLevel = meta.levels[0]!;
-    const overviewTiles = overviewLevel.cols * overviewLevel.rows <= 12
-      ? windowTiles(meta, props.page, 0, 0, 0, meta.pageW, meta.pageH, 0)
-      : windowTiles(meta, props.page, 0, view.x - halfW, view.y - halfH, halfW * 2, halfH * 2, 0);
+    // A whole tall-page overview can cost over a MiB on the 3DS Relay link.
+    // Read the visible part first; the camera requests more as the user pans.
+    const overviewTiles = windowTiles(meta, props.page, 0, view.x - halfW, view.y - halfH, halfW * 2, halfH * 2, 0);
     syncTiles(overviewWorld, overview, overviewTiles);
     if (activeLevel > 0) {
-      syncTiles(activeWorld, active, windowTiles(meta, props.page, activeLevel, view.x - halfW, view.y - halfH, halfW * 2, halfH * 2, PREFETCH));
+      const visible = windowTiles(meta, props.page, activeLevel, view.x - halfW, view.y - halfH, halfW * 2, halfH * 2, 0);
+      const ready = visible.every(tile => !!props.view.value(address(tile.pack, tile.entry)));
+      syncTiles(activeWorld, active, ready
+        ? windowTiles(meta, props.page, activeLevel, view.x - halfW, view.y - halfH, halfW * 2, halfH * 2, PREFETCH)
+        : visible);
     }
 
     // Demand: the pinned overview is admitted first, the sharp window next.
