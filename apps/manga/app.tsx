@@ -75,6 +75,8 @@ export default function Manga() {
   const [activeSummary, setActiveSummary] = createSignal<SeriesSummary>();
   const [selected, setSelected] = createSignal(0);
   const [pageStatus, setPageStatus] = createSignal("");
+  const [pagePreviewReady, setPagePreviewReady] = createSignal(false);
+  let readerFailed: TileAddress[] = [];
   const [page, setPage] = createSignal(0);
   const [chapterSel, setChapterSel] = createSignal(0);
   const [progress, setProgress] = createSignal<Progress>(emptyProgress());
@@ -333,6 +335,7 @@ export default function Manga() {
   }
   function openReader(start = 0) {
     if (!fullMeta()) return;
+    setPageStatus("OPENING PAGE..."); setPagePreviewReady(false);
     setPage(Math.max(0, Math.min(start, fullMeta()!.pages - 1)));
     setScreen("reader");
   }
@@ -361,10 +364,16 @@ export default function Manga() {
   }
   function nextPage() {
     const meta = fullMeta();
-    if (meta && page() + 1 < meta.pages) setPage(page() + 1);
+    if (meta && page() + 1 < meta.pages) {
+      setPageStatus("OPENING PAGE..."); setPagePreviewReady(false);
+      setPage(page() + 1);
+    }
   }
   function prevPage() {
-    if (page() > 0) setPage(page() - 1);
+    if (page() > 0) {
+      setPageStatus("OPENING PAGE..."); setPagePreviewReady(false);
+      setPage(page() - 1);
+    }
   }
 
   onButtonPress(BTN.UP, () => {
@@ -412,6 +421,14 @@ export default function Manga() {
   onButtonPress(BTN.START, () => {
     if (osk.isOpen()) return;
     if (screen() === "library") cycleSort();
+    else if (screen() === "reader") {
+      const pending = readerDemand.filter(item => item.priority <= 1 && pageView.state(item.input).status !== "ready");
+      const keys = new Set([...readerFailed, ...pending.map(item => item.input)].map(input => `${input.pack}/${input.entry}`));
+      if (keys.size) {
+        pages.invalidate(input => keys.has(`${input.pack}/${input.entry}`), true);
+        setPageStatus("RETRYING PAGE...");
+      }
+    }
     else if (screen() === "series" && current() && !downloading()) {
       if (!removeArmed()) { setRemoveArmed(true); setDownloadLabel("START again: remove offline copy"); return; }
       setRemoveArmed(false);
@@ -522,7 +539,7 @@ export default function Manga() {
     if (screen() === "reader") {
       const meta = fullMeta();
       const dir = meta ? (meta.direction === "rtl" ? "RIGHT-TO-LEFT" : "LEFT-TO-RIGHT") : "";
-      return `TOUCH: tap sides page, drag pan, pinch zoom  |  SQUARE mode  ZL/ZR zoom  TRIANGLE fit  L/R page  SELECT bookmark (${dir})`;
+      return `TOUCH: tap sides page, drag pan  |  SQUARE mode  ZL/ZR zoom  TRIANGLE fit  L/R page  START retry  SELECT bookmark (${dir})`;
     }
     if (screen() === "series") {
       if (!fullMeta()) return metaError() ? `${metaError()} | TRIANGLE retry` : "LOADING SERIES METADATA...";
@@ -683,13 +700,26 @@ export default function Manga() {
                 width={VIEW_W}
                 height={VIEW_H}
                 mode={viewMode()}
-                onStatus={(ready, total, failed) => setPageStatus(ready >= total ? "" : failed ? (online() ? "Page unavailable. Reopen to retry." : "Page not fully cached. Connect companion to download.") : "LOADING PAGE...")}
+                onStatus={(status) => {
+                  readerFailed = status.failed;
+                  const preview = status.previewTotal > 0 && status.previewReady === status.previewTotal;
+                  const detail = status.detailTotal > 0 && status.detailReady === status.detailTotal;
+                  setPagePreviewReady(preview || detail);
+                  if (!preview && detail) setPageStatus("READABLE | PREVIEW UNAVAILABLE | START RETRY");
+                  else if (!preview) setPageStatus(status.previewFailed
+                    ? (online() ? "PREVIEW UNAVAILABLE | START RETRY" : "OFFLINE | PAGE NOT CACHED")
+                    : `OPENING PAGE ${status.previewReady}/${status.previewTotal}`);
+                  else if (status.detailFailed) setPageStatus("READABLE | DETAIL UNAVAILABLE | START RETRY");
+                  else if (status.detailReady < status.detailTotal)
+                    setPageStatus(`READABLE | SHARPENING ${status.detailReady}/${status.detailTotal}`);
+                  else setPageStatus("");
+                }}
                 onDemand={(list) => {
                   readerDemand = list;
                 }}
                 onPage={(delta) => (delta > 0 ? nextPage() : prevPage())}
               />
-              <Show when={pageStatus()}>
+              <Show when={pageStatus() && !pagePreviewReady()}>
                 <View class="absolute left-2 bottom-2 px-2 py-1 bg-[#000000cc]">
                   <Text class="text-xs text-white">{pageStatus()}</Text>
                 </View>
@@ -800,6 +830,7 @@ export default function Manga() {
           <Show when={screen() === "reader"}>
             <View class="flex-col w-full px-3 pt-3 gap-2">
               <Text class={night() ? "text-sm text-white" : "text-sm text-[#2a2214]"}>{readerLabel()}</Text>
+              <Text class={night() ? "text-xs text-blue-200" : "text-xs text-[#5a4a31]"}>{pageStatus() || "PAGE READY"}</Text>
               <View class="w-full h-[8] bg-slate-700">
                 <View class="h-[8] bg-blue-500" style={{ width: readerProgress() }} />
               </View>

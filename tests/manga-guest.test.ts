@@ -33,11 +33,25 @@ test.each([false, true])("compiled terminal retains selection and caches with Re
     }, { get: (o, key) => key in o ? o[key as keyof typeof o] : String(key).startsWith("__") ? undefined : noop });
     const series = ["a", "b"].map(slug => ({ slug, title: slug === "a" ? "Alpha" : "Beta", pages: 2, direction: "rtl" }));
     const records = new Map<string, string>([["manga-index/0", JSON.stringify({ v: 3, series })],
-      ...series.map(s => [`manga-${s.slug}/0`, JSON.stringify({ ...s, pageW: 400, pageH: 600, levels: [{ scale: 1, cols: 2, rows: 3 }] })] as [string, string])]);
+      ...series.map(s => [`manga-${s.slug}/0`, JSON.stringify({ ...s, pageW: 400, pageH: 600, levels: [
+        { scale: 0.5, cols: 1, rows: 2 }, { scale: 1, cols: 2, rows: 3 },
+      ] })] as [string, string])]);
     if (relay) { records.set("mc-123/0", records.get("manga-index/0")!); records.set("manga-index/0", '{"catalog":"mc-123"}'); }
     const cached = relay ? new Map<string, string>() : records;
     const cachedImages = new Set<string>();
     const replies: string[] = [], requests: string[] = [];
+    const heldImages: { id: number; entry: number }[] = [];
+    let holdPreview = false, holdDetail = false;
+    const imageReply = (id: number, entry: number) => replies.push(JSON.stringify({ id, image: {
+      token: token++, width: entry === 1 ? 128 : 256, height: entry === 1 ? 128 : 256,
+    } }));
+    const releaseImages = () => {
+      for (let i = 0; i < heldImages.length;) {
+        const image = heldImages[i]!;
+        if (image.entry <= 3 ? holdPreview : holdDetail) { i++; continue; }
+        imageReply(image.id, image.entry); heldImages.splice(i, 1);
+      }
+    };
     const packs = {
       session: () => 1,
       enqueue(id: number, pack: string, entry: number) {
@@ -45,7 +59,10 @@ test.each([false, true])("compiled terminal retains selection and caches with Re
         if (entry === 0) {
           const payload = cached.get(`${pack}/${entry}`);
           replies.push(JSON.stringify(payload ? { id, payload } : { id, error: "Resource pack not installed" }));
-        } else if (!relay || cachedImages.has(`${pack}/${entry}`)) replies.push(JSON.stringify({ id, image: { token: token++, width: entry === 1 ? 128 : 256, height: entry === 1 ? 128 : 256 } }));
+        } else if (!relay || cachedImages.has(`${pack}/${entry}`)) {
+          if (pack === "manga-b" && (entry <= 3 ? holdPreview : holdDetail)) heldImages.push({ id, entry });
+          else imageReply(id, entry);
+        }
         else replies.push(JSON.stringify({ id, error: "Resource pack not installed" }));
         return true;
       },
@@ -96,7 +113,19 @@ test.each([false, true])("compiled terminal retains selection and caches with Re
       visit(1); visit(2); return values.join("|");
     };
     await frames(); expect(visible()).toContain("Alpha"); expect(visible()).toContain("Beta");
-    await press(BTN.DOWN); await press(BTN.CIRCLE); await press(BTN.CIRCLE);
+    await press(BTN.DOWN); await press(BTN.CIRCLE);
+    if (!relay) { holdPreview = true; holdDetail = true; }
+    await press(BTN.CIRCLE);
+    if (!relay) {
+      expect(visible()).toContain("OPENING PAGE");
+      expect(requests).toContain("manga-b/2");
+      expect(requests).not.toContain("manga-b/4");
+      holdPreview = false; releaseImages(); await frames();
+      expect(visible()).toContain("READABLE | SHARPENING");
+      expect(requests).toContain("manga-b/4");
+      holdDetail = false; releaseImages(); await frames();
+      expect(visible()).toContain("PAGE READY");
+    }
     await press(BTN.RTRIGGER); await press(BTN.SELECT);
     expect(visible()).toContain("Beta");
     expect(JSON.parse(saved).series.b.page).toBe(1);

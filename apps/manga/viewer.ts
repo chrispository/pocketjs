@@ -50,6 +50,11 @@ export interface ViewerDemand {
   input: TileAddress;
   priority: number;
 }
+export interface ReaderTileStatus {
+  previewReady: number; previewTotal: number; previewFailed: number;
+  detailReady: number; detailTotal: number; detailFailed: number;
+  failed: TileAddress[];
+}
 
 /** Initial framing: fit the page width (default), the whole page, or 1:1. */
 export type ViewMode = "width" | "page" | "native";
@@ -67,7 +72,7 @@ export interface PageViewerProps {
   onDemand: (list: ViewerDemand[]) => void;
   /** At fit zoom a LEFT/RIGHT press requests a page turn instead of a pan. */
   onPage: (delta: number) => void;
-  onStatus?: (ready: number, total: number, failed: number) => void;
+  onStatus?: (status: ReaderTileStatus) => void;
   onView?: (info: { zoom: number; level: number }) => void;
 }
 
@@ -128,6 +133,8 @@ export function PageViewer(props: PageViewerProps): SolidJSX.Element {
   const overview = new Map<number, Mounted>();
   const active = new Map<number, Mounted>();
   const demand: ViewerDemand[] = [];
+  let nextPreview: TileAddress[] = [];
+  let detailStarted = false;
 
   function modeZoom(meta: SeriesMeta): number {
     const max = Math.max(0, Math.log2(props.width / meta.pageW), Math.log2(meta.levels[meta.levels.length - 1]!.scale));
@@ -186,12 +193,14 @@ export function PageViewer(props: PageViewerProps): SolidJSX.Element {
     for (const m of active.values()) detachNode(activeWorld, m.node);
     active.clear();
     activeLevel = -1;
+    detailStarted = false;
   };
 
   const switchLevel = (meta: SeriesMeta, next: number) => {
     for (const m of active.values()) detachNode(activeWorld, m.node);
     active.clear();
     activeLevel = next;
+    detailStarted = false;
     if (next <= 0) return; // level 0 is the pinned overview
     const lv = meta.levels[next]!;
     setProp(activeWorld, "style", { width: lv.cols * TILE, height: lv.rows * TILE });
@@ -202,6 +211,13 @@ export function PageViewer(props: PageViewerProps): SolidJSX.Element {
     addresses.clear();
     cam = makeCamera(meta);
     mountOverview(meta, page);
+    nextPreview = [];
+    if (page + 1 < meta.pages) {
+      const next = makeCamera(meta).view(), scale = 2 ** next.zoom;
+      nextPreview = windowTiles(meta, page + 1, 0,
+        next.x - props.width / 2 / scale, next.y - props.height / 2 / scale,
+        props.width / scale, props.height / scale, 0).map(tile => address(tile.pack, tile.entry));
+    }
     lastIdeal = -1;
     idealRun = 0;
   };
@@ -257,18 +273,30 @@ export function PageViewer(props: PageViewerProps): SolidJSX.Element {
     // Read the visible part first; the camera requests more as the user pans.
     const overviewTiles = windowTiles(meta, props.page, 0, view.x - halfW, view.y - halfH, halfW * 2, halfH * 2, 0);
     syncTiles(overviewWorld, overview, overviewTiles);
-    if (activeLevel > 0) {
+    const previewStates = [...overview.values()].map(m => props.view.state(m.input));
+    const previewSettled = previewStates.every(state => state.status === "ready" || state.status === "error");
+    let visibleDetail: TileAddress[] = [];
+    if (activeLevel > 0 && (previewSettled || detailStarted)) {
+      detailStarted = true;
       const visible = windowTiles(meta, props.page, activeLevel, view.x - halfW, view.y - halfH, halfW * 2, halfH * 2, 0);
+      visibleDetail = visible.map(tile => address(tile.pack, tile.entry));
       const ready = visible.every(tile => !!props.view.value(address(tile.pack, tile.entry)));
       syncTiles(activeWorld, active, ready
         ? windowTiles(meta, props.page, activeLevel, view.x - halfW, view.y - halfH, halfW * 2, halfH * 2, PREFETCH)
         : visible);
-    }
+    } else if (active.size) syncTiles(activeWorld, active, []);
 
     // Demand: the pinned overview is admitted first, the sharp window next.
     demand.length = 0;
     for (const m of overview.values()) demand.push({ input: m.input, priority: 0 });
-    for (const m of active.values()) demand.push({ input: m.input, priority: 1 });
+    const visibleKeys = new Set(visibleDetail.map(input => `${input.pack}/${input.entry}`));
+    for (const m of active.values()) demand.push({ input: m.input,
+      priority: visibleKeys.has(`${m.input.pack}/${m.input.entry}`) ? 1 : 3 });
+    const detailStates = visibleDetail.map(input => props.view.state(input));
+    // Queue the next low-detail page as soon as this one is readable. Its
+    // lower priority leaves current-page sharp tiles ahead of it.
+    if (previewStates.length > 0 && previewStates.every(state => state.status === "ready"))
+      for (const input of nextPreview) demand.push({ input, priority: 2 });
     props.onDemand(demand);
     if (addresses.size > 96) {
       const used = new Set(demand.map(d => `${d.input.pack}/${d.input.entry}`));
@@ -290,13 +318,18 @@ export function PageViewer(props: PageViewerProps): SolidJSX.Element {
         m.handle = value.handle;
       }
     }
-    let ready = 0, failed = 0;
-    for (const m of overview.values()) {
-      const state = props.view.state(m.input);
-      if (state.status === "ready") ready++;
-      if (state.status === "error") failed++;
-    }
-    props.onStatus?.(ready, overview.size, failed);
+    const failed = [
+      ...[...overview.values()].filter((_, i) => previewStates[i]?.status === "error"),
+    ].map(m => m.input).concat(visibleDetail.filter((_, i) => detailStates[i]?.status === "error"));
+    props.onStatus?.({
+      previewReady: previewStates.filter(state => state.status === "ready").length,
+      previewTotal: previewStates.length,
+      previewFailed: previewStates.filter(state => state.status === "error").length,
+      detailReady: detailStates.filter(state => state.status === "ready").length,
+      detailTotal: detailStates.length,
+      detailFailed: detailStates.filter(state => state.status === "error").length,
+      failed,
+    });
     const tx = props.width / 2 - view.x * scale;
     const ty = props.height / 2 - view.y * scale;
     const ov = meta.levels[0]!;

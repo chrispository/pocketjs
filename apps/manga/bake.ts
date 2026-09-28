@@ -365,7 +365,9 @@ export function bake(args: Args) {
     const sourceW = sizes.reduce((max, size) => Math.max(max, size.width), 1);
     const nativeScale = Math.min(args.zoom, Math.max(1, Math.floor(sourceW / args.width)));
     const levels: LevelMeta[] = [];
-    const overviewScale = Math.min(1, 768 / pageH, 768 / args.width);
+    // Keep the first visible rendition within one tile across and two down.
+    // It is the page's readable placeholder while sharper tiles stream in.
+    const overviewScale = Math.min(1, TILE / args.width, (TILE * 2) / pageH);
     if (overviewScale < 1) {
       const grid = tileGrid(Math.round(args.width * overviewScale), Math.round(pageH * overviewScale));
       levels.push({ scale: overviewScale, cols: grid.cols, rows: grid.rows });

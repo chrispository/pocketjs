@@ -369,6 +369,7 @@ describe("manga baker", () => {
     expect(baked.pageW).toBe(400);
     expect(baked.pageH).toBe(300);
     expect(baked.levels).toEqual([
+      { scale: 0.64, cols: 1, rows: 1 },
       { scale: 1, cols: 2, rows: 2 },
       { scale: 2, cols: 4, rows: 3 },
     ]);

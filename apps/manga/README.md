@@ -25,7 +25,7 @@ bun apps/manga/companion.ts
 
 Companion 的管理网页默认使用 **127.0.0.1:8743**，Pocket Relay TCP 监听默认使用 **127.0.0.1:8742**。`--port`、`--relay-port` 和 `--relay-host` 分别控制这些地址。旧入口 `bun run manga:relay` 保留，数据目录和 `.relay.lock` 文件名保留；升级不需要移动现有书库。
 
-终端检测宿主的 `relayChannel`：存在时用 Pocket Relay，不存在时用 offload。Relay 提供书库订阅、资源版本与条件读取、分块图片、请求取消，以及进度备份操作。连接在 HELLO 前校验 64 个十六进制字符的配对密钥；此 TCP 试点不加密。需要网络上的 Relay 宿主访问时可指定 `--relay-host 0.0.0.0`。
+终端检测宿主的 `relayChannel`：存在时用 Pocket Relay，不存在时用 offload。Relay 提供书库订阅、资源版本与条件读取、分块图片、请求取消，以及进度备份操作。支持像素解压的宿主通过 Relay 接收 zlib 压缩的 RGB565 图片，旧宿主继续接收原始 RGB565。连接在 HELLO 前校验 64 个十六进制字符的配对密钥；此 TCP 试点不加密。需要网络上的 Relay 宿主访问时可指定 `--relay-host 0.0.0.0`。
 
 Manga 的 3DS 构建包含原生 Relay 字节通道。配置了有效的配对密钥与 companion 地址后，3DS 主动连接 Relay；缺少任一配置文件时不发布 `relayChannel`，继续使用 offload。PSP 宿主仍需原生 Relay 通道。3DS 的原生 TCP、编译后的 guest 和离线缓存链路有测试覆盖；真机网络与帧率仍需设备验收。
 
@@ -53,8 +53,10 @@ sdmc:/pocketjs/relay/b4da3f33b88e66e6.host    内容如 192.168.1.10
 
 ## 缓存与离线阅读
 
+- 阅读器先显示当前视窗的低清页面，再加载可见的清晰图块。下屏显示 `OPENING PAGE`、`READABLE | SHARPENING` 或失败状态；失败后按 **START** 重试未完成的图块，已显示的图块留在屏幕上。
+- Companion 打开作品时预热页首清晰图块及后续页面的低清图块；读取页面后继续预热后面的页面。终端在当前页可读后请求下一页的低清图块，当前页清晰图块仍有更高优先级。新导入作品的低清层至多一块宽、两块高；已有包仍可读取。
 - 在线阅读时，封面、元数据和读取过的图片分块写入终端缓存。图片收到后即可显示，SD 在后台写入；同一页的阅读和离线下载共用请求。
-- 刷新时重新确认 companion 的书库指针，未变化的目录记录复用本地副本，不重复下载或写 SD。终端元数据 LRU 上限为 32 条、64 KiB；companion 解码资源 LRU 上限为 256 条、8 MiB。
+- 刷新时重新确认 companion 的书库指针，未变化的目录记录复用本地副本，不重复下载或写 SD。终端元数据 LRU 上限为 32 条、64 KiB；companion 解码及压缩资源 LRU 上限为 512 条、32 MiB。
 - 在作品页按 **SELECT** 保存全部页面和缩放层；再次按 SELECT 取消。失败或中断后重试会跳过通过校验的本地记录。
 - 只有全部记录写入成功，才显示 **SAVED OFFLINE**。看过某一页不等于保存了整个作品。
 - 完整离线目录保留下载完成时的版本。companion 更新或移除作品后，旧离线副本仍在终端可用。
@@ -109,7 +111,7 @@ MangaDex 适配器依据其[官方 API 定义](https://api.mangadex.org/docs/sta
 | --- | --- |
 | 书库 | UP/DOWN 选择，A/CIRCLE 打开，TRIANGLE 搜索，START 排序，SELECT 刷新 |
 | 作品 | UP/DOWN 选章，A/CIRCLE 阅读，B/CROSS 返回，TRIANGLE 重试元数据，SELECT 保存/取消离线下载，START 两次删除网络缓存 |
-| 阅读 | L/R 翻页，方向键/摇杆平移，ZL/ZR 缩放，SQUARE 切换适宽/适页/1:1，TRIANGLE 复位到页首，SELECT 书签，B/CROSS 返回 |
+| 阅读 | L/R 翻页，方向键/摇杆平移，ZL/ZR 缩放，SQUARE 切换适宽/适页/1:1，TRIANGLE 复位到页首，START 重试未完成图块，SELECT 书签，B/CROSS 返回 |
 | 触摸 | 下屏封面选书、章节选读；阅读中点两侧翻页，拖动平移；多点宿主可捏合缩放 |
 
 适宽时 LEFT/RIGHT 根据作品的 RTL/LTR 方向翻页；宽度超出屏幕时改为平移。3DS 的触摸屏是单点输入。非阅读界面的 SQUARE 切换夜色/纸色。

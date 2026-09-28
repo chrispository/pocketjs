@@ -51,7 +51,7 @@ export interface SeriesMeta {
   pageH: number;
   direction: "rtl" | "ltr";
   pack?: string;
-  /** Ascending by scale; levels[0] is the fit canvas used as the overview. */
+  /** Ascending by scale; levels[0] is the coarse page overview. */
   levels: LevelMeta[];
   /** Present when the series holds more than one chapter; starts at page 0. */
   chapters?: ChapterMeta[];
