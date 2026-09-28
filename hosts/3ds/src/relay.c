@@ -286,6 +286,10 @@ static void serve(void *unused) {
     if (fd >= 0) {
       int flags = fcntl(fd, F_GETFL, 0);
       if (flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0) {
+        /* Large image records otherwise fill the 3DS socket's small default
+         * receive window before the Relay worker can drain them. */
+        int receive_bytes = RELAY_WINDOW_BYTES;
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &receive_bytes, sizeof receive_bytes);
 #ifdef TCP_NODELAY
         int enabled = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof enabled);
