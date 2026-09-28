@@ -127,11 +127,15 @@ test.each([false, true])("compiled terminal retains selection and caches with Re
       holdPreview = false; releaseImages(); await frames();
       expect(visible()).toContain("READABLE | SHARPENING");
       expect(requests).toContain("manga-b/4");
+      expect(requests).not.toContain("manga-b/10");
       failDetail = true; holdDetail = false; releaseImages(); await frames();
       expect(visible()).toContain("READABLE | DETAIL UNAVAILABLE | START RETRY");
+      expect(requests).not.toContain("manga-b/10");
       failDetail = false;
       await press(BTN.START);
       expect(visible()).toContain("PAGE READY");
+      await frames(50);
+      expect(requests).toContain("manga-b/10");
     }
     await press(BTN.RTRIGGER); await press(BTN.SELECT);
     expect(visible()).toContain("Beta");

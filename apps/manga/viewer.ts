@@ -135,6 +135,7 @@ export function PageViewer(props: PageViewerProps): SolidJSX.Element {
   const demand: ViewerDemand[] = [];
   let nextPreview: TileAddress[] = [];
   let detailStarted = false;
+  let settledFrames = 0;
 
   function modeZoom(meta: SeriesMeta): number {
     const max = Math.max(0, Math.log2(props.width / meta.pageW), Math.log2(meta.levels[meta.levels.length - 1]!.scale));
@@ -212,6 +213,7 @@ export function PageViewer(props: PageViewerProps): SolidJSX.Element {
     cam = makeCamera(meta);
     mountOverview(meta, page);
     nextPreview = [];
+    settledFrames = 0;
     if (page + 1 < meta.pages) {
       const next = makeCamera(meta).view(), scale = 2 ** next.zoom;
       nextPreview = windowTiles(meta, page + 1, 0,
@@ -293,9 +295,12 @@ export function PageViewer(props: PageViewerProps): SolidJSX.Element {
     for (const m of active.values()) demand.push({ input: m.input,
       priority: visibleKeys.has(`${m.input.pack}/${m.input.entry}`) ? 1 : 3 });
     const detailStates = visibleDetail.map(input => props.view.state(input));
-    // Queue the next low-detail page as soon as this one is readable. Its
-    // lower priority leaves current-page sharp tiles ahead of it.
-    if (previewStates.length > 0 && previewStates.every(state => state.status === "ready"))
+    // The companion prepares later pages in RAM. On the narrow device link,
+    // wait for the foreground to settle before transferring the next preview.
+    const foregroundReady = previewStates.length > 0 && previewStates.every(state => state.status === "ready") &&
+      (activeLevel <= 0 || detailStates.length > 0 && detailStates.every(state => state.status === "ready"));
+    settledFrames = foregroundReady ? Math.min(45, settledFrames + 1) : 0;
+    if (settledFrames >= 45)
       for (const input of nextPreview) demand.push({ input, priority: 2 });
     props.onDemand(demand);
     if (addresses.size > 96) {

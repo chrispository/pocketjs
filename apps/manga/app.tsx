@@ -130,7 +130,9 @@ export default function Manga() {
 
   // One shared budget for library covers and page tiles. maxCollections is 2.
   const runtime = createResourceRuntime({
-    maxConcurrent: 4,
+    // A small 3DS receive window favors finishing one Relay image before the
+    // next starts, so the first usable tile appears before later pages load.
+    maxConcurrent: transport.protocol === "relay" ? 1 : 4,
     startsPerFrame: 1,
     completionsPerFrame: 1,
     maxCollections: 2,
