@@ -48,11 +48,14 @@ export function gbaRom(elf: Uint8Array): Uint8Array {
 
 async function main() {
   if (process.argv.includes("--help")) {
-    console.log("bun hosts/gba/build.ts [--outdir=<directory>]\nRequires rustup toolchain install nightly-2026-07-01 --component rust-src");
+    console.log("bun hosts/gba/build.ts [--outdir=<directory>] [--spinner-region=on|off]\nRequires rustup toolchain install nightly-2026-07-01 --component rust-src");
     return;
   }
   const options = process.argv.slice(2);
-  if (options.some(arg => !arg.startsWith("--outdir="))) throw new Error("Unknown argument; use --help");
+  if (options.some(arg => !arg.startsWith("--outdir=") && !arg.startsWith("--spinner-region="))) throw new Error("Unknown argument; use --help");
+  const spinnerRegion = options.find(arg => arg.startsWith("--spinner-region="))?.slice(17) ?? "on";
+  if (spinnerRegion !== "on" && spinnerRegion !== "off") throw new Error("--spinner-region must be on or off");
+  const spinnerLayoutRegion = spinnerRegion === "on";
   const out = resolve(options.find(arg => arg.startsWith("--outdir="))?.slice(9) ?? resolve(root, "dist/gba"));
   const gen = resolve(out, "generated");
   mkdirSync(out, { recursive: true });
@@ -67,7 +70,7 @@ async function main() {
     writeFileSync(path, image.rgba);
     images.push(`{ let id = ui.core_mut().upload_texture(include_bytes!(${JSON.stringify(path)}), ${image.width}, ${image.height}, microts::pocketjs_core::spec::psm::PSM_8888); assert!(id >= 0); ui.register_image(${JSON.stringify(name)}, id); }`);
   }
-  writeFileSync(resolve(gen, "include.rs"), `#[path = ${JSON.stringify(resolve(gen, "mod.rs"))}]\nmod generated;\n#[allow(dead_code)]\nfn load_fonts(ui: &mut microts::Ui) {\n${fonts.map(font => `assert!(ui.core_mut().load_font_atlas(include_bytes!(${JSON.stringify(resolve(gen, `font-${font.slot}.bin`))})));`).join("\n")}\n}\n#[allow(dead_code)]\nfn load_images(ui: &mut microts::Ui) {\n${images.join("\n")}\n}\n`);
+  writeFileSync(resolve(gen, "include.rs"), `#[path = ${JSON.stringify(resolve(gen, "mod.rs"))}]\nmod generated;\n#[allow(dead_code)]\nconst SPINNER_LAYOUT_REGION: bool = ${spinnerLayoutRegion};\n#[allow(dead_code)]\nfn load_fonts(ui: &mut microts::Ui) {\n${fonts.map(font => `assert!(ui.core_mut().load_font_atlas(include_bytes!(${JSON.stringify(resolve(gen, `font-${font.slot}.bin`))})));`).join("\n")}\n}\n#[allow(dead_code)]\nfn load_images(ui: &mut microts::Ui) {\n${images.join("\n")}\n}\n`);
   const bakeDirectory = resolve(out, "baked");
   mkdirSync(bakeDirectory, { recursive: true });
   const bakeCommand = ["cargo", "+stable", "run", "--locked", "--release", "--manifest-path", resolve(root, "hosts/gba/bake/Cargo.toml"), "--target-dir", resolve(out, "bake-target"), "--", bakeDirectory];
@@ -86,7 +89,7 @@ async function main() {
   writeFileSync(resolve(out, "build.json"), JSON.stringify({
     target: "thumbv4t-none-eabi", toolchain: GBA_TOOLCHAIN, command, rustflags, bakeCommand,
     romBytes: rom.length, romSha256: hash(rom), elfSha256: hash(elf),
-    app: "apps/gba-hero", nominalTickHz: 30, vblanksPerPresentation: 2,
+    app: "apps/gba-hero", nominalTickHz: 30, vblanksPerPresentation: 2, spinnerLayoutRegion,
     fontSlots: result.program.styles.usedFontSlots,
     renderer: "mode0-bg-obj", assets,
   }, null, 2) + "\n");

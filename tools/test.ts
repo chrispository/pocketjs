@@ -251,6 +251,7 @@ const SUITE: readonly Stage[] = [
       "tests/microts-specialization-dependencies.test.ts",
       "tests/microts-specialization-contract.test.ts",
       "tests/microts-specialization-regions.test.ts",
+      "tests/gba-spinner-region.test.ts",
       "tests/microts-specialization-bake.test.ts",
       "tests/microts-static-draw-plan.test.ts",
       "tests/microts-specialization-guest.test.ts",
