@@ -1,0 +1,21 @@
+{
+  "viewport": [480, 272],
+  "frames": [
+    { "buttons": 0, "touch": [[32, 80]] },
+    { "buttons": 16384 },
+    { "buttons": 0 },
+    { "buttons": 16384 },
+    { "buttons": 0, "axes": [32000, 0] },
+    { "buttons": 32768 },
+    { "buttons": 0 },
+    { "buttons": 8192 },
+    { "buttons": 0 },
+    { "buttons": 8192 },
+    { "buttons": 0 },
+    { "buttons": 4096 },
+    { "buttons": 0 },
+    { "buttons": 4096 },
+    { "buttons": 32 },
+    { "buttons": 0, "viewport": [400, 240], "touch": [[32, 80], [460, 260]] }
+  ]
+}

@@ -240,6 +240,25 @@ const SUITE: readonly Stage[] = [
     ],
   },
   {
+    name: "MicroTS UI specialization",
+    prep: [
+      ["cargo", "test", "--manifest-path", "engine/core/Cargo.toml", "--features", "counters"],
+      ["cargo", "test", "--manifest-path", "engine/crates/microts/Cargo.toml", "--features", "counters,harness"],
+    ],
+    tests: [
+      "tests/microts-specialization-report.test.ts",
+      "tests/microts-specialization-codegen.test.ts",
+      "tests/microts-specialization-dependencies.test.ts",
+      "tests/microts-specialization-contract.test.ts",
+      "tests/microts-specialization-regions.test.ts",
+      "tests/microts-specialization-bake.test.ts",
+      "tests/microts-static-draw-plan.test.ts",
+      "tests/microts-specialization-guest.test.ts",
+      "tests/microts-specialization-harness.test.ts",
+      "tests/aot-harness-identities.test.ts",
+    ],
+  },
+  {
     name: "vue-sfc journeys",
     prep: [
       ["bun", "tools/build.ts", "vue-sfc-lab-main", "--framework=vue-vapor"],

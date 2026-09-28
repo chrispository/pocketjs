@@ -1,0 +1,204 @@
+mod gen;
+use gen::*;
+use microts::{Cmd, Host, Input, NodeId, Ready, Ui};
+use microts::model::{AnimationResult, Completion, Delivery, RequestId, TaskId, Value as ModelValue};
+use serde_json::{json, Value};
+use std::{cell::RefCell, rc::Rc};
+
+__MODEL_SOURCE__
+
+#[derive(Default)]
+struct Trace { commands: Vec<Value>, ready: Vec<String> }
+struct Native { ui: Ui, trace: Rc<RefCell<Trace>> }
+fn identity(ui: &Ui, node: NodeId) -> String {
+    ui.logical_node(node).unwrap_or_else(|| panic!("unregistered logical node {:?}", node)).to_owned()
+}
+fn command_target(ui:&Ui, node:NodeId) -> Value {
+    json!({"identity":identity(ui,node),"live":ui.core().node_exists(node.0)})
+}
+fn command(ui: &Ui, value: &Cmd) -> Value {
+    match value {
+        Cmd::Animate { node, prop, to, dur, easing, delay, request } => json!({
+            "kind":"animate", "node":node.map(|id| command_target(ui,id)), "prop":prop,
+            "to":to, "to_bits":to.to_bits(), "dur":dur, "easing":easing, "delay":delay, "request":format!("{:?}",request)
+        }),
+        Cmd::Jump { node, prop, value } => json!({"kind":"jump", "node":node.map(|id|command_target(ui,id)), "prop":prop, "value":value, "value_bits":value.to_bits()}),
+        _ => json!(format!("{:?}", value)),
+    }
+}
+impl Host for Native {
+    fn ui(&self) -> &Ui { &self.ui }
+    fn ui_mut(&mut self) -> &mut Ui { &mut self.ui }
+    fn into_ui(self) -> Ui { self.ui }
+    fn model_initial_ready(&mut self) -> Ready {
+        let ready = self.ui.model_initial_ready();
+        self.trace.borrow_mut().ready.push(format!("{:?}",ready)); ready
+    }
+    fn model_ready(&mut self) -> Ready {
+        let ready = self.ui.model_ready();
+        self.trace.borrow_mut().ready.push(format!("{:?}",ready)); ready
+    }
+    fn model_command(&mut self, value: Cmd) {
+        self.trace.borrow_mut().commands.push(command(&self.ui, &value));
+        // A tape supplies service completions; the UI owns animation completions.
+        if !matches!(value, Cmd::Request { .. }) { self.ui.model_command(value); }
+    }
+}
+impl<const B:u32> microts::HasButton<B> for Native {}
+impl<const A:u8> microts::HasRelativeAxis<A> for Native {}
+impl<const L:u8> microts::HasMotion<L> for Native {}
+impl microts::HasTouch for Native {}
+
+fn n(value:&Value) -> f32 { value.as_f64().unwrap_or(0.0) as f32 }
+fn u(value:&Value) -> u32 { value.as_u64().unwrap_or(0) as u32 }
+fn values<const N:usize>(value:&Value) -> [f32;N] { std::array::from_fn(|i|n(&value[i])) }
+fn motion(value:&Value) -> microts::motion::MotionState {
+    use microts::motion::*;
+    let vector = |name:&str| MotionVector { value:values(&value[name]["value"]), quality:u(&value[name]["quality"]) as u8 };
+    let scalar = |name:&str| MotionScalar { value:n(&value[name]["value"]), quality:u(&value[name]["quality"]) as u8 };
+    let o=&value["orientation"]; let h=&value["heading"]; let a=&value["angles"]; let t=&value["tilt"];
+    MotionState {
+        timestamp:value["timestamp"].as_u64().unwrap_or(0),
+        gravity_direction:vector("gravity_direction"), inclination:scalar("inclination"),
+        linear_acceleration:vector("linear_acceleration"), rotation_rate:vector("rotation_rate"),
+        screen_rotation:scalar("screen_rotation"),
+        orientation:MotionOrientation { value:values(&o["value"]), quality:u(&o["quality"]) as u8, reference_frame:u(&o["reference_frame"]) as u8, epoch:u(&o["epoch"]) },
+        heading:MotionHeading { value:n(&h["value"]), accuracy:n(&h["accuracy"]), quality:u(&h["quality"]) as u8, reference_frame:u(&h["reference_frame"]) as u8 },
+        tilt:MotionPair { value:values(&t["value"]), quality:u(&t["quality"]) as u8 },
+        angles:MotionAngles { value:values(&a["value"]), quality:u(&a["quality"]) as u8, reference_frame:u(&a["reference_frame"]) as u8, epoch:u(&a["epoch"]) },
+    }
+}
+fn model_value(value:&Value) -> ModelValue {
+    match value {
+        Value::Null => ModelValue::Unit,
+        Value::Bool(v) => ModelValue::Bool(*v),
+        Value::Number(v) => ModelValue::Number(v.as_f64().unwrap()),
+        Value::String(v) => ModelValue::String(v.clone()),
+        Value::Array(v) => ModelValue::Array(v.iter().map(model_value).collect()),
+        Value::Object(v) if v.get("$i32").is_some() => ModelValue::I32(v["$i32"].as_i64().unwrap() as i32),
+        Value::Object(v) => ModelValue::Object(v.iter().map(|(k,v)|(k.clone(),model_value(v))).collect()),
+    }
+}
+fn delivery(value:&Value) -> Delivery {
+    let request=&value["request"]; let task=&request["task"]; let result=&value["result"];
+    Delivery {
+        request:RequestId { task:TaskId { region:u(&task["region"]), function:u(&task["function"]), call:u(&task["call"]) }, wait:u(&request["wait"]), member:u(&request["member"]) },
+        result:match result["kind"].as_str().expect("delivery result.kind") {
+            "value" => Completion::Value(model_value(&result["value"])),
+            "cancelled" => Completion::Cancelled,
+            "animation" => Completion::Animation(match result["value"].as_str().unwrap() { "ended"=>AnimationResult::Ended, "replaced"=>AnimationResult::Replaced, "dropped"=>AnimationResult::Dropped, _=>panic!("unknown animation result") }),
+            _ => panic!("unknown delivery result"),
+        },
+    }
+}
+fn environment(ui:&mut Ui, value:&Value) {
+    if let Some(v)=value["viewport"].as_array() { assert_eq!(v.len(),2); ui.core_mut().set_viewport(n(&v[0]),n(&v[1])); }
+    if let Some(fonts)=value["fonts"].as_array() { for path in fonts {
+        let bytes=std::fs::read(path.as_str().unwrap()).unwrap(); assert!(ui.core_mut().load_font_atlas(&bytes));
+    }}
+    if let Some(deliveries)=value["deliveries"].as_array() { for item in deliveries { ui.queue_model_delivery(delivery(item)); }}
+}
+fn tree(ui:&Ui, id:i32) -> Value {
+    json!({"node":identity(ui,NodeId(id)), "type":ui.core().node_type(id), "text":ui.core().node_text(id),
+        "children":ui.core().node_children(id).iter().map(|child|tree(ui,*child)).collect::<Vec<_>>()})
+}
+struct Pixels {
+    trackers: [microts::pocketjs_core::damage::DamageTracker<8>; 2],
+    buffers: [Vec<u8>; 2],
+    frame: usize,
+}
+impl Pixels {
+    fn new() -> Self { Self { trackers: Default::default(), buffers: Default::default(), frame: 0 } }
+    fn check(&mut self, ui:&Ui, words:&[u32]) -> (String, u64, u64, u64, [i32;4]) {
+        use microts::pocketjs_core::{damage::DamageTarget, raster};
+        let (w,h)=ui.core().viewport();
+        let size=w as usize * h as usize * 4;
+        let mut full=vec![0;size]; raster::render(ui.core(),words,&mut full);
+        let mut counts=(0,0,0);
+        let mut bounds=[0;4];
+        for slot in 0..2 {
+            if slot==1 && self.frame%2==1 {continue;}
+            self.buffers[slot].resize(size,0);
+            self.trackers[slot].reset_counters();
+            let target=DamageTarget::new(w as u32,h as u32,1,42);
+            let plan=self.trackers[slot].prepare(ui.core(),words,target).unwrap();
+            raster::render_scaled_regions(ui.core(),words,&mut self.buffers[slot],1,plan.regions());
+            assert_eq!(self.buffers[slot],full,"damage replay differs at frame {}, buffer {}",self.frame,slot);
+            self.trackers[slot].commit(ui.core(),words,target);
+            if slot==0 {
+                let c=self.trackers[slot].counters(); counts=(c.area,c.full_redraws,c.decoded_ops);
+                for (index,rect) in plan.regions().iter().enumerate() {
+                    if index==0 { bounds=[rect.x0,rect.y0,rect.x1,rect.y1]; }
+                    else { bounds=[bounds[0].min(rect.x0),bounds[1].min(rect.y0),bounds[2].max(rect.x1),bounds[3].max(rect.y1)]; }
+                }
+            }
+        }
+        self.frame+=1;
+        let hash=full.iter().fold(2166136261u32,|hash,byte|(hash ^ *byte as u32).wrapping_mul(16777619));
+        (format!("{:08x}",hash),counts.0,counts.1,counts.2,bounds)
+    }
+}
+fn snapshot(ui:&mut Ui, sample:&Value, trace:&Rc<RefCell<Trace>>, pixels:&mut Pixels, frame_ns:u64) -> Value {
+    let draw_start=std::time::Instant::now();
+    let draw=ui.core_mut().draw();
+    let draw_ns=draw_start.elapsed().as_nanos() as u64;
+    let words=draw.words.clone();
+    let (pixels_hash,damage_area,damage_full_redraws,damage_decoded_ops,damage_bounds)=pixels.check(ui,&words);
+    let hash=words.iter().flat_map(|word|word.to_le_bytes()).fold(2166136261u32,|hash,byte|(hash ^ byte as u32).wrapping_mul(16777619));
+    let mut hits=Vec::new();
+    if let Some(points)=sample["touch"].as_array() { for point in points {
+        let hit=ui.core_mut().hit_test(n(&point[0]),n(&point[1])); hits.push(identity(ui,NodeId(hit)));
+    }}
+    let counters=ui.counters(); let core=ui.core().counters(); let mut trace=trace.borrow_mut();
+    json!({"words":words,"hash":format!("{:08x}",hash),"pixels_hash":pixels_hash,"glyph_misses":ui.core().glyph_misses(),"focused":identity(ui,ui.focused()),"hits":hits,
+        "tree":tree(ui,NodeId::ROOT.0),
+        "commands":std::mem::take(&mut trace.commands),"ready":std::mem::take(&mut trace.ready),
+        "counters":{"update_at":counters.update_at,"memo_evaluations":counters.memo_evaluations,"memo_writes":counters.memo_writes,
+            "set_style":counters.set_style,"set_prop":counters.set_prop,"set_text":counters.set_text,
+            "nodes_created":counters.nodes_created,"nodes_destroyed":counters.nodes_destroyed,
+            "structure_rebuilds":core.layout.structure_rebuilds,"shaping_calls":core.layout.shaping_calls,
+            "style_updates":core.layout.style_updates,"taffy_nodes":core.layout.taffy_nodes,
+            "draw_ops":core.draw.ops,"draw_words":core.draw.words,
+            "generated_words":core.draw.generated_words,"region_cache_hits":core.draw.region_cache_hits,
+            "static_plan_hits":core.draw.static_plan_hits,
+            "region_cache_bytes":core.draw.region_cache_bytes,"segment_table_bytes":core.draw.segment_table_bytes,
+            "draw_segments":ui.core().draw_segments().len(),
+            "damage_area":damage_area,"damage_full_redraws":damage_full_redraws,"damage_decoded_ops":damage_decoded_ops,
+            "damage_min_x":damage_bounds[0],"damage_min_y":damage_bounds[1],"damage_max_x":damage_bounds[2],"damage_max_y":damage_bounds[3],
+            "shaping_cache_hits":core.layout.shaping_cache_hits,"shaping_cache_bytes":core.layout.shaping_cache_bytes,
+            "frame_ns":frame_ns,"draw_ns":draw_ns}})
+}
+fn main() {
+    let tape:Value=serde_json::from_str(include_str!(__TAPE__)).unwrap();
+    let trace=Rc::new(RefCell::new(Trace::default())); let mut ui=Ui::new();
+    __PREPARE_SPECIALIZATION__
+    assert!(ui.load_styles(include_bytes!("gen/styles.bin")));
+    for bytes in [__FONTS__] { assert!(ui.core_mut().load_font_atlas(bytes)); }
+    environment(&mut ui,&tape);
+    if let Some(hz)=tape["hz"].as_u64() { assert!(ui.core_mut().set_tick_rate(hz as u32)); }
+    if let Some(services)=tape["services"].as_array() { ui.set_model_services(services.iter().map(|service|service.as_str().unwrap().to_owned())); }
+    let mut app=__ROOT__App::new(Native { ui, trace:trace.clone() }, __PROPS__, __MODEL__);
+    let boot=app.ui().counters();
+    let boot_counters=json!({"nodes_created":boot.nodes_created,"nodes_destroyed":boot.nodes_destroyed,
+        "set_style":boot.set_style,"set_prop":boot.set_prop,"set_text":boot.set_text,
+        "update_at":boot.update_at,"memo_evaluations":boot.memo_evaluations,"memo_writes":boot.memo_writes});
+    let mut frames=Vec::new();
+    let mut pixels=Pixels::new();
+    for sample in tape["frames"].as_array().unwrap() {
+        app.ui_mut().reset_counters(); environment(app.ui_mut(),sample);
+        if sample["invalidate"].as_bool()==Some(true) { app.invalidate(); }
+        if sample["set_props"].as_bool()==Some(true) { app.set_props(__PROPS__); }
+        let mut input=Input::buttons(u(&sample["buttons"]));
+        if let Some(axes)=sample["axes"].as_array() { assert_eq!(axes.len(),2); for (i,delta) in axes.iter().enumerate() { input.axis_deltas[i]=delta.as_i64().unwrap() as i32; }}
+        if !sample["motion"].is_null() { input.motion=Some(motion(&sample["motion"])); }
+        if let Some(point)=sample["press"].as_array() {
+            let target=NodeId(app.ui_mut().core_mut().hit_test(n(&point[0]),n(&point[1]))); input=Input { target, ..input };
+        }
+        let frame_start=std::time::Instant::now();
+        app.frame(&input);
+        let frame_ns=frame_start.elapsed().as_nanos() as u64;
+        frames.push(snapshot(app.ui_mut(),sample,&trace,&mut pixels,frame_ns));
+    }
+    app.unmount();
+    println!("{}",json!({"bootCounters":boot_counters,"frames":frames,"cleanup":trace.borrow().commands}));
+}
