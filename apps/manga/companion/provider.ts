@@ -88,7 +88,7 @@ export function mangaMethods(root: string, budget = { maxEntries: 512, maxBytes:
     }
     if (compressed && result.image && !result.compressed) {
       const { pixels, width, height } = result.image;
-      const packed = deflateSync(pixels, { level: 1 });
+      const packed = deflateSync(pixels, { level: 6 });
       if (packed.length < pixels.length) result.compressed = { pixels: packed, width, height };
     }
     cache.set(key, { signature: current, resource: result },
