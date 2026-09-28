@@ -27,6 +27,30 @@ use crate::spec;
 use crate::style::{self, StyleTable, NO_GRADIENT};
 use crate::text::Fonts;
 use crate::tree::Tree;
+#[path = "draw_regions.rs"]
+mod regions;
+
+/// Build-time words for a proven template. Coordinate slots contain packed,
+/// region-relative signed i16 positions. The initial path requires the exact
+/// baked integer placement and clip; mismatches use the ordinary paint walk.
+pub struct StaticDrawPlan {
+    pub words: &'static [u32],
+    pub coordinates: &'static [u32],
+    pub patches: &'static [StaticDrawPatch],
+    pub origin: [f32; 2],
+    pub size: [f32; 2],
+    pub clip: [f32; 4],
+    pub opacity: f32,
+    pub viewport: [f32; 2],
+    pub bounds: crate::damage::DamageRect,
+}
+
+/// A finite, nontransparent root RECT color domain proven by the compiler.
+pub struct StaticDrawPatch {
+    pub word: u32,
+    pub prop: u8,
+    pub candidates: &'static [u32],
+}
 
 /// The core -> backend command list: flat little-endian u32 words.
 /// Format pinned in contracts/spec/spec.ts ("DRAWLIST op format"); op codes in
@@ -36,11 +60,62 @@ use crate::tree::Tree;
 /// so snapshots, hashes and damage diffs never need side data.
 pub struct DrawList {
     pub words: Vec<u32>,
+    regions: Option<alloc::boxed::Box<regions::Regions>>,
+    #[cfg(feature = "counters")]
+    pub(crate) counters: crate::counters::DrawCounters,
 }
 
 impl DrawList {
     pub fn new() -> Self {
-        DrawList { words: Vec::new() }
+        DrawList {
+            words: Vec::new(),
+            regions: None,
+            #[cfg(feature = "counters")]
+            counters: crate::counters::DrawCounters::default(),
+        }
+    }
+
+    pub(crate) fn set_region(&mut self, id: i32, enabled: bool, budget: usize) {
+        if enabled && self.regions.is_none() {
+            self.regions = Some(alloc::boxed::Box::new(regions::Regions::new(budget)));
+        }
+        if let Some(regions) = &mut self.regions {
+            regions.budget = budget;
+            regions.set_region(id, enabled);
+            regions.trim();
+        }
+    }
+    pub(crate) fn invalidate_node(&mut self, tree: &Tree, id: i32) {
+        if let Some(regions) = &mut self.regions { regions.invalidate_node(tree, id); }
+    }
+    pub(crate) fn invalidate_prop(&mut self, tree: &Tree, id: i32, prop: u8) {
+        if let Some(regions) = &mut self.regions { regions.invalidate_patch(tree, id, Some(prop)); }
+    }
+    pub(crate) fn invalidate_state(&mut self, tree: &Tree, id: i32) {
+        if let Some(regions) = &mut self.regions { regions.invalidate_patch(tree, id, None); }
+    }
+    pub(crate) fn invalidate_all(&mut self) {
+        if let Some(regions) = &mut self.regions { regions.invalidate_all(); }
+    }
+    pub(crate) fn clear_regions(&mut self) { self.regions = None; }
+    pub(crate) fn set_static_plan(&mut self, id: i32, plan: &'static StaticDrawPlan) -> bool {
+        let Some(entry) = self.regions.as_mut().and_then(|regions| regions.entries.get_mut(&id)) else { return false; };
+        if !regions::valid_static_plan(plan) { return false; }
+        entry.static_plan = Some(plan);
+        true
+    }
+    pub fn segments(&self) -> &[crate::resources::DrawSegment] {
+        self.regions.as_ref().map_or(&[], |regions| regions.segments.as_slice())
+    }
+    #[cfg(feature = "counters")]
+    pub(crate) fn segment_table_bytes(&self) -> u64 {
+        self.regions.as_ref().map_or(0, |regions| {
+            let capacity = regions.entries.values()
+                .filter_map(|entry| entry.cached.as_ref())
+                .fold(regions.segments.capacity() as u64, |total, cached|
+                    total.saturating_add(cached.segments.capacity() as u64));
+            capacity.saturating_mul(core::mem::size_of::<crate::resources::DrawSegment>() as u64)
+        })
     }
 }
 
@@ -1114,7 +1189,10 @@ pub fn build_root(
     inspect_prev: Option<(f32, f32, f32, f32)>,
     cursor: Option<(u32, f32, f32, f32, f32)>,
 ) -> (Option<(f32, f32, f32, f32)>, Option<(f32, f32, f32, f32)>, bool) {
+    #[cfg(feature = "counters")]
+    { dl.counters.builds = dl.counters.builds.saturating_add(1); }
     dl.words.clear();
+    if let Some(regions) = &mut dl.regions { regions.begin(tree); }
     // DevTools (docs/DEVTOOLS.md): slot of the inspected node, u32::MAX = none.
     // Nodes inside a perspective subtree take the paint_3d path and are not
     // captured (only the 2D walk composes a world Affine per node).
@@ -1189,11 +1267,162 @@ pub fn build_root(
             1.0,
         );
     }
+    #[cfg(feature = "counters")]
+    {
+        // Count completed output, excluding abandoned empty glyph headers.
+        // This walk is absent from builds without the counters feature.
+        let mut index = 0;
+        while index < dl.words.len() {
+            let len = match dl.words[index] {
+                spec::draw_op::RECT => 4,
+                spec::draw_op::GRAD_RECT => 6,
+                spec::draw_op::GLYPH_RUN => 3 + 2 * (dl.words[index + 1] >> 16) as usize,
+                spec::draw_op::TEX_QUAD | spec::draw_op::SURFACE_QUAD => 9,
+                spec::draw_op::SCISSOR => 3,
+                spec::draw_op::SCISSOR_POP => 1,
+                spec::draw_op::TRI => 7,
+                spec::draw_op::TEX_TRI => 12,
+                spec::draw_op::TEXT_RUN => 8 + (dl.words[index + 7] as usize).div_ceil(4),
+                _ => unreachable!("draw builder emitted an unknown opcode"),
+            };
+            dl.counters.ops = dl.counters.ops.saturating_add(1);
+            index += len;
+        }
+        dl.counters.words = dl.counters.words.saturating_add(dl.words.len() as u64);
+        let reused = dl.regions.as_ref().map_or(0, |regions| regions.reused_words);
+        dl.counters.generated_words = dl.counters.generated_words.saturating_add((dl.words.len() - reused) as u64);
+        dl.counters.region_cache_bytes = dl.regions.as_ref().map_or(0, |regions| regions.bytes()) as u64;
+    }
     (target, drawn, provider_stale)
 }
 
 impl<'a> Walker<'a> {
     fn paint(
+        &mut self,
+        slot: u32,
+        parent_world: Affine,
+        opacity: f32,
+        clip: Clip,
+        in_transform: bool,
+        dl: &mut DrawList,
+    ) {
+        let node = &self.tree.slots[slot as usize];
+        let id = node.id(slot);
+        if !dl.regions.as_ref().is_some_and(|regions| regions.entries.contains_key(&id)) {
+            self.paint_uncached(slot, parent_world, opacity, clip, in_transform, dl);
+            return;
+        }
+        let resolved = style::resolve(node, self.styles, true);
+        // A perspective context sorts primitives across region boundaries.
+        // Its descendants are painted through collect_3d, not this wrapper.
+        // Streaming paint refreshes resident glyph usage. Cached words would
+        // skip those touches and change eviction choices, so preserve the walk.
+        let streamed = (0..spec::MAX_FONT_SLOTS).any(|slot|
+            self.fonts.atlas(slot as u8).is_some_and(|atlas| atlas.stream.is_some()));
+        if resolved.perspective > 0.0 || streamed {
+            self.paint_uncached(slot, parent_world, opacity, clip, in_transform, dl);
+            return;
+        }
+        let world = parent_world.then(&local_affine(&node.layout, &resolved));
+        let mut key = regions::Key::new(world, clip,
+            clampf(opacity * resolved.opacity, 0.0, 1.0), (node.layout.w, node.layout.h),
+            self.screen, in_transform || resolved.declares_transform(), self.font_revisions);
+        let regions = dl.regions.as_mut().unwrap();
+        let entry = regions.entries.get_mut(&id).unwrap();
+        if entry.sprites { key.frame = self.frame; }
+        if self.inspect_slot == u32::MAX {
+            if let Some(plan) = entry.static_plan {
+                if regions::static_matches(plan, &key)
+                    && plan.patches.iter().all(|patch| patch.candidates.contains(&resolved.get_bits(patch.prop)))
+                {
+                    let start = dl.words.len();
+                    dl.words.extend_from_slice(plan.words);
+                    for &coordinate in plan.coordinates {
+                        let word = &mut dl.words[start + coordinate as usize];
+                        let x = (*word as u16 as i16 as i32 + plan.origin[0] as i32) as i16 as u16 as u32;
+                        let y = ((*word >> 16) as u16 as i16 as i32 + plan.origin[1] as i32) as i16 as u16 as u32;
+                        *word = x | (y << 16);
+                    }
+                    for patch in plan.patches {
+                        dl.words[start + patch.word as usize] = resolved.get_bits(patch.prop);
+                    }
+                    let origin = (plan.origin[0] as i32, plan.origin[1] as i32);
+                    let bounds = crate::damage::DamageRect::new(plan.bounds.x0 + origin.0,
+                        plan.bounds.y0 + origin.1, plan.bounds.x1 + origin.0, plan.bounds.y1 + origin.1);
+                    regions.segments.push(crate::resources::DrawSegment { id: id as u64,
+                        parent: regions.stack.last().copied(), word_start: start, word_end: dl.words.len(),
+                        bounds, clip: regions::rect(clip), revision: entry.revision,
+                        patch_bounds: (!plan.patches.is_empty()).then_some(bounds),
+                        placement: key.world, order: regions.segments.len() as u32 });
+                    regions.reused_words += plan.words.len();
+                    #[cfg(feature = "counters")]
+                    { dl.counters.static_plan_hits = dl.counters.static_plan_hits.saturating_add(1); }
+                    return;
+                }
+            }
+            if let Some(cached) = &entry.cached {
+                if cached.revision == entry.revision && cached.key == key {
+                    let start = dl.words.len();
+                    dl.words.extend_from_slice(&cached.words);
+                    regions.reused_words += cached.words.len();
+                    for (index, segment) in cached.segments.iter().enumerate() {
+                        let mut segment = *segment;
+                        segment.word_start += start;
+                        segment.word_end += start;
+                        segment.order = regions.segments.len() as u32;
+                        if index == 0 { segment.parent = regions.stack.last().copied(); }
+                        regions.segments.push(segment);
+                    }
+                    entry.touched = regions.clock;
+                    #[cfg(feature = "counters")]
+                    { dl.counters.region_cache_hits = dl.counters.region_cache_hits.saturating_add(1); }
+                    return;
+                }
+            }
+        }
+        entry.revision = entry.revision.wrapping_add(1);
+        let revision = entry.revision;
+        let start = dl.words.len();
+        let segment_index = regions.segments.len();
+        regions.segments.push(crate::resources::DrawSegment {
+            id: id as u64, parent: regions.stack.last().copied(),
+            word_start: start, word_end: start, bounds: crate::damage::DamageRect::empty(),
+            clip: regions::rect(clip), revision, placement: key.world, order: segment_index as u32,
+            patch_bounds: None,
+        });
+        regions.stack.push(id as u64);
+        let glyph_misses = self.fonts.misses.get();
+        self.paint_uncached(slot, parent_world, opacity, clip, in_transform, dl);
+        let bounds = crate::damage::slice_bounds(
+            &regions::BoundsResources { fonts: self.fonts, screen: self.screen },
+            &dl.words[start..], regions::rect(Clip::viewport(self.screen)), regions::rect(clip));
+        let regions = dl.regions.as_mut().unwrap();
+        regions.stack.pop();
+        regions.segments[segment_index].word_end = dl.words.len();
+        regions.segments[segment_index].bounds = bounds;
+        let entry = regions.entries.get_mut(&id).unwrap();
+        entry.sprites = regions::has_sprites(self.tree, slot);
+        if entry.sprites { key.frame = self.frame; }
+        entry.cached = if (dl.words.len() - start) * 4 <= regions.budget && !self.provider_stale
+            && self.fonts.misses.get() == glyph_misses {
+            let (mut words, mut segments) = entry.cached.take()
+                .map(|cached| (cached.words, cached.segments)).unwrap_or_default();
+            words.clear();
+            words.extend_from_slice(&dl.words[start..]);
+            segments.clear();
+            segments.extend(regions.segments[segment_index..].iter().map(|segment| {
+                let mut segment = *segment;
+                segment.word_start -= start;
+                segment.word_end -= start;
+                segment
+            }));
+            Some(regions::Cached { key, revision, words, segments })
+        } else { None };
+        entry.touched = regions.clock;
+        regions.trim();
+    }
+
+    fn paint_uncached(
         &mut self,
         slot: u32,
         parent_world: Affine,

@@ -28,5 +28,8 @@ pocketjs-core = { path = ".", features = ["std"] }
 
 [features]
 default = []
+# Opt-in work counters for MicroTS specialization validation. No fields or
+# instrumentation are compiled into ordinary guest builds.
+counters = []
 # Host-test convenience: links std (and taffy's std) instead of no_std+alloc.
 std = ["taffy/std"]

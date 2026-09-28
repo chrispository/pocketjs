@@ -385,6 +385,9 @@ impl Ui {
         }
         let ok = self.fonts.atlas_mut(slot).unwrap().stream_configure(b);
         if ok {
+            if let Some(identity) = &mut self.specialization_identity {
+                identity.invalidate_font(slot);
+            }
             self.font_revisions[slot as usize] = self.font_revisions[slot as usize].wrapping_add(1);
             self.mark_layout_dirty();
             self.bump_raster_revision();
@@ -465,6 +468,9 @@ impl Ui {
         };
         let n = a.stream_commit(b);
         if n > 0 {
+            if let Some(identity) = &mut self.specialization_identity {
+                identity.invalidate_font(slot);
+            }
             self.font_revisions[slot as usize] = self.font_revisions[slot as usize].wrapping_add(1);
             self.mark_layout_dirty();
             self.bump_raster_revision();

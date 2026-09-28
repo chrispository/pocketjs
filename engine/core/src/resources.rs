@@ -1,6 +1,30 @@
 //! Borrowed raster resources. Renderers need these views, not the retained
 //! tree or the Rust layout of `Ui`. C adapters can implement this contract.
 use crate::{TexView, Ui};
+use crate::damage::DamageRect;
+
+/// One contiguous, scissor-balanced region in the current DrawList.
+///
+/// Providers keep identities stable across frames, change `revision` when any
+/// region input changes, and include nested changes in the outer revision.
+/// Entries occur in paint order, with parents before children. Bounds include
+/// every painted pixel; `clip` is the inherited clip at the start of the slice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DrawSegment {
+    pub id: u64,
+    pub parent: Option<u64>,
+    pub word_start: usize,
+    pub word_end: usize,
+    pub bounds: DamageRect,
+    pub clip: DamageRect,
+    pub revision: u64,
+    /// Proven root color-patch pixels; two patch frames compare this rectangle
+    /// without decoding their static instructions.
+    pub patch_bounds: Option<DamageRect>,
+    /// The six f32 bit patterns of the world affine transform.
+    pub placement: [u32; 6],
+    pub order: u32,
+}
 
 #[derive(Clone, Copy)]
 pub struct FontView<'a> {
@@ -33,6 +57,11 @@ pub trait RenderResources {
     fn raster_revision(&self) -> u64;
     fn texture(&self, handle: i32) -> Option<TexView<'_>>;
     fn font_atlas(&self, slot: u8) -> Option<FontView<'_>>;
+    /// Optional native specialization metadata for the current DrawList.
+    /// The default preserves the operation-by-operation damage contract.
+    fn draw_segments(&self) -> &[DrawSegment] {
+        &[]
+    }
 }
 
 impl RenderResources for Ui {
@@ -41,6 +70,9 @@ impl RenderResources for Ui {
     }
     fn raster_revision(&self) -> u64 {
         Ui::raster_revision(self)
+    }
+    fn draw_segments(&self) -> &[DrawSegment] {
+        Ui::draw_segments(self)
     }
     fn texture(&self, handle: i32) -> Option<TexView<'_>> {
         Ui::texture(self, handle)

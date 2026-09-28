@@ -33,10 +33,21 @@ pub struct MeasureCtx {
     /// shaping is the expensive half of layout on the PSP; the taffy
     /// measure closure must never re-shape per solve pass.
     pub size: (f32, f32),
+    #[cfg(feature = "counters")]
+    pub(crate) cache_hit: bool,
 }
 
 impl MeasureCtx {
-    fn shaped(
+    #[cfg(feature = "counters")]
+    pub(crate) fn count(&self, counters: &mut crate::counters::LayoutCounters) {
+        if self.cache_hit {
+            counters.shaping_cache_hits = counters.shaping_cache_hits.saturating_add(1);
+        } else {
+            counters.shaping_calls = counters.shaping_calls.saturating_add(1);
+        }
+    }
+
+    pub(crate) fn shaped(
         fonts: &Fonts,
         text: String,
         slot: u8,
@@ -44,8 +55,12 @@ impl MeasureCtx {
         line_height: f32,
         native: bool,
     ) -> MeasureCtx {
-        let size = fonts.measure_run_provider(native, &text, slot, tracking, line_height);
-        MeasureCtx { text, slot, tracking, line_height, size }
+        let cached = if native { None } else { fonts.cached_shaped_size(slot, &text, tracking, line_height) };
+        let size = cached.unwrap_or_else(|| fonts.measure_run_provider(native, &text, slot, tracking, line_height));
+        MeasureCtx { text, slot, tracking, line_height, size,
+            #[cfg(feature = "counters")]
+            cache_hit: cached.is_some(),
+        }
     }
 }
 
@@ -68,6 +83,8 @@ pub struct LayoutEngine {
     /// Layout viewport in px. Defaults to the PSP screen; desktop hosts set it
     /// through `Ui::set_viewport` (the draw clip stage uses the same bounds).
     pub viewport: (f32, f32),
+    #[cfg(feature = "counters")]
+    pub counters: crate::counters::LayoutCounters,
 }
 
 impl Default for LayoutEngine {
@@ -95,6 +112,8 @@ impl LayoutEngine {
             built: false,
             root: None,
             viewport: (spec::SCREEN_W as f32, spec::SCREEN_H as f32),
+            #[cfg(feature = "counters")]
+            counters: crate::counters::LayoutCounters::default(),
         }
     }
 }
@@ -249,6 +268,7 @@ fn build(
     taffy: &mut TaffyTree<MeasureCtx>,
     slot: u32,
     in_transform: bool,
+    #[cfg(feature = "counters")] counters: &mut crate::counters::LayoutCounters,
 ) -> Option<taffy::NodeId> {
     let resolved = style::resolve(&tree.slots[slot as usize], styles, true);
     let in_transform = in_transform || resolved.declares_transform();
@@ -271,7 +291,14 @@ fn build(
             resolved.line_height,
             native,
         );
+        #[cfg(feature = "counters")]
+        ctx.count(counters);
         let nid = taffy.new_leaf_with_context(to_taffy(&resolved), ctx).ok()?;
+        #[cfg(feature = "counters")]
+        {
+            counters.taffy_nodes_created = counters.taffy_nodes_created.saturating_add(1);
+            counters.taffy_nodes += 1;
+        }
         tree.slots[slot as usize].taffy = Some(nid);
         return Some(nid);
     }
@@ -279,12 +306,21 @@ fn build(
     let mut kids: Vec<taffy::NodeId> = Vec::with_capacity(children.len());
     for c in children {
         if let Some(cs) = tree.resolve(c) {
-            if let Some(k) = build(tree, styles, fonts, taffy, cs, in_transform) {
+            if let Some(k) = build(
+                tree, styles, fonts, taffy, cs, in_transform,
+                #[cfg(feature = "counters")]
+                counters,
+            ) {
                 kids.push(k);
             }
         }
     }
     let nid = taffy.new_with_children(to_taffy(&resolved), &kids).ok()?;
+    #[cfg(feature = "counters")]
+    {
+        counters.taffy_nodes_created = counters.taffy_nodes_created.saturating_add(1);
+        counters.taffy_nodes += 1;
+    }
     tree.slots[slot as usize].taffy = Some(nid);
     Some(nid)
 }
@@ -395,8 +431,12 @@ pub fn relayout_root(
                     resolved.line_height,
                     native,
                 );
+                #[cfg(feature = "counters")]
+                ctx.count(&mut eng.counters);
                 let _ = eng.taffy.set_node_context(nid, Some(ctx));
             }
+            #[cfg(feature = "counters")]
+            { eng.counters.style_updates = eng.counters.style_updates.saturating_add(1); }
             let _ = eng.taffy.set_style(nid, to_taffy(&resolved));
         }
         if let Some(root_nid) = eng.root {
@@ -404,6 +444,11 @@ pub fn relayout_root(
             return;
         }
         eng.dirty = true; // no built root (should not happen) — full rebuild
+    }
+    #[cfg(feature = "counters")]
+    {
+        eng.counters.structure_rebuilds = eng.counters.structure_rebuilds.saturating_add(1);
+        eng.counters.taffy_nodes = 0;
     }
     eng.taffy.clear();
     eng.style_dirty.clear();
@@ -418,7 +463,11 @@ pub fn relayout_root(
         eng.root = None;
         return;
     };
-    let Some(root_nid) = build(tree, styles, fonts, &mut eng.taffy, root_slot, false) else {
+    let Some(root_nid) = build(
+        tree, styles, fonts, &mut eng.taffy, root_slot, false,
+        #[cfg(feature = "counters")]
+        &mut eng.counters,
+    ) else {
         eng.dirty = false;
         eng.built = false;
         eng.root = None;

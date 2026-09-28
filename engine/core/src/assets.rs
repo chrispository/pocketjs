@@ -43,6 +43,9 @@ impl Ui {
             return Ok(());
         }
         let mut staged = Ui::new_with_raster_density(self.raster_density);
+        if self.specialization_identity.is_some() {
+            staged.enable_font_identity();
+        }
         let mut staged_handles = vec![-1; inputs.len()];
         let mut styles = false;
         let mut fonts = [false; spec::MAX_FONT_SLOTS];
@@ -103,6 +106,9 @@ impl Ui {
             .map_err(|_| AssetError::NoMemory)?;
 
         // No fallible operation or allocation is allowed below this point.
+        if let (Some(identity), Some(staged_identity)) = (&mut self.specialization_identity, &staged.specialization_identity) {
+            identity.merge_loaded(staged_identity);
+        }
         if styles {
             self.styles = staged.styles;
         }

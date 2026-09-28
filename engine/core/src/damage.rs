@@ -13,7 +13,7 @@
 //! still call [`DamageTracker::invalidate`] for output-affecting mutations
 //! performed outside `Ui`.
 
-use crate::resources::RenderResources;
+use crate::resources::{DrawSegment, RenderResources};
 use alloc::vec::Vec;
 
 use crate::spec;
@@ -288,19 +288,35 @@ impl<const MAX_REGIONS: usize> DamagePlan<MAX_REGIONS> {
 /// DrawList snapshot associated with one persistent render target.
 pub struct DamageTracker<const MAX_REGIONS: usize = DEFAULT_DAMAGE_REGIONS> {
     words: Vec<u32>,
+    segments: Vec<DrawSegment>,
     target: DamageTarget,
     raster_revision: u64,
     valid: bool,
+    #[cfg(feature = "counters")]
+    counters: core::cell::Cell<crate::counters::DamageCounters>,
 }
 
 impl<const MAX_REGIONS: usize> DamageTracker<MAX_REGIONS> {
     pub const fn new() -> Self {
         Self {
             words: Vec::new(),
+            segments: Vec::new(),
             target: DamageTarget::new(0, 0, 0, 0),
             raster_revision: 0,
             valid: false,
+            #[cfg(feature = "counters")]
+            counters: core::cell::Cell::new(crate::counters::DamageCounters::ZERO),
         }
+    }
+
+    #[cfg(feature = "counters")]
+    pub fn counters(&self) -> crate::counters::DamageCounters {
+        self.counters.get()
+    }
+
+    #[cfg(feature = "counters")]
+    pub fn reset_counters(&self) {
+        self.counters.set(crate::counters::DamageCounters::ZERO);
     }
 
     /// Force the next frame to repaint the complete target.
@@ -328,11 +344,37 @@ impl<const MAX_REGIONS: usize> DamageTracker<MAX_REGIONS> {
         let full_redraw =
             !self.valid || self.target != target || self.raster_revision != ui.raster_revision();
         let damage = if full_redraw {
-            validate_draw_list(ui, words, screen)?;
+            validate_draw_list(
+                ui, words, screen,
+                #[cfg(feature = "counters")]
+                &self.counters,
+            )?;
             DamagePlan::full(screen)
+        } else if (!self.segments.is_empty() || !ui.draw_segments().is_empty())
+            && valid_segments(&self.segments, self.words.len())
+            && valid_segments(ui.draw_segments(), words.len())
+        {
+            segmented_damage(
+                ui, &self.words, words, &self.segments, ui.draw_segments(), screen,
+                screen, screen,
+                #[cfg(feature = "counters")]
+                &self.counters,
+            )?
         } else {
-            draw_list_damage(ui, &self.words, words, screen)?
+            draw_list_damage(
+                ui, &self.words, words, screen,
+                #[cfg(feature = "counters")]
+                &self.counters,
+            )?
         };
+        #[cfg(feature = "counters")]
+        {
+            let mut counts = self.counters.get();
+            counts.prepares = counts.prepares.saturating_add(1);
+            counts.area = counts.area.saturating_add(damage.area());
+            counts.full_redraws = counts.full_redraws.saturating_add(u64::from(damage.is_full_redraw()));
+            self.counters.set(counts);
+        }
         Ok(damage)
     }
 
@@ -342,6 +384,8 @@ impl<const MAX_REGIONS: usize> DamageTracker<MAX_REGIONS> {
             self.words.clear();
             self.words.extend_from_slice(words);
         }
+        self.segments.clear();
+        self.segments.extend_from_slice(ui.draw_segments());
         self.target = target;
         self.raster_revision = ui.raster_revision();
         self.valid = true;
@@ -396,10 +440,15 @@ struct DamageDecoder<'a> {
     clip: DamageRect,
     stack: [DamageRect; CLIP_DEPTH],
     depth: usize,
+    #[cfg(feature = "counters")]
+    counters: &'a core::cell::Cell<crate::counters::DamageCounters>,
 }
 
 impl<'a> DamageDecoder<'a> {
-    fn new(words: &'a [u32], screen: DamageRect) -> Self {
+    fn new(
+        words: &'a [u32], screen: DamageRect,
+        #[cfg(feature = "counters")] counters: &'a core::cell::Cell<crate::counters::DamageCounters>,
+    ) -> Self {
         Self {
             words,
             index: 0,
@@ -407,6 +456,8 @@ impl<'a> DamageDecoder<'a> {
             clip: screen,
             stack: [screen; CLIP_DEPTH],
             depth: 0,
+            #[cfg(feature = "counters")]
+            counters,
         }
     }
 
@@ -474,6 +525,12 @@ impl<'a> DamageDecoder<'a> {
             spec::draw_op::SURFACE_QUAD => logical_rect(words[6], words[7]).intersect(self.clip),
             _ => return Err(()),
         };
+        #[cfg(feature = "counters")]
+        {
+            let mut counts = self.counters.get();
+            counts.decoded_ops = counts.decoded_ops.saturating_add(1);
+            self.counters.set(counts);
+        }
         Ok(Some(DecodedOp {
             code,
             words,
@@ -491,13 +548,40 @@ fn draw_list_damage<const MAX_REGIONS: usize>(
     previous: &[u32],
     current: &[u32],
     screen: DamageRect,
+    #[cfg(feature = "counters")] counters: &core::cell::Cell<crate::counters::DamageCounters>,
+) -> Result<DamagePlan<MAX_REGIONS>, DamageError> {
+    clipped_draw_list_damage(
+        ui, previous, current, screen, screen, screen,
+        #[cfg(feature = "counters")]
+        counters,
+    )
+}
+
+fn clipped_draw_list_damage<const MAX_REGIONS: usize>(
+    ui: &impl RenderResources,
+    previous: &[u32],
+    current: &[u32],
+    screen: DamageRect,
+    previous_clip: DamageRect,
+    current_clip: DamageRect,
+    #[cfg(feature = "counters")] counters: &core::cell::Cell<crate::counters::DamageCounters>,
 ) -> Result<DamagePlan<MAX_REGIONS>, DamageError> {
     if previous == current {
         return Ok(DamagePlan::empty(screen));
     }
 
-    let mut old = DamageDecoder::new(previous, screen);
-    let mut new = DamageDecoder::new(current, screen);
+    let mut old = DamageDecoder::new(
+        previous, screen,
+        #[cfg(feature = "counters")]
+        counters,
+    );
+    let mut new = DamageDecoder::new(
+        current, screen,
+        #[cfg(feature = "counters")]
+        counters,
+    );
+    old.clip = previous_clip.intersect(screen);
+    new.clip = current_clip.intersect(screen);
     let mut damage = DamagePlan::empty(screen);
     loop {
         let old_op = old.next(ui).map_err(|_| DamageError::MalformedDrawList)?;
@@ -519,12 +603,174 @@ fn draw_list_damage<const MAX_REGIONS: usize>(
     Ok(damage)
 }
 
+// Metadata is optional. Reject inconsistent ranges before indexing and use the
+// legacy path. Providers guarantee operation boundaries and balanced slices.
+fn valid_segments(segments: &[DrawSegment], words: usize) -> bool {
+    let mut end = 0;
+    for (index, segment) in segments.iter().enumerate() {
+        if segment.word_start > segment.word_end || segment.word_end > words
+            || segments[..index].iter().any(|old| old.id == segment.id)
+        {
+            return false;
+        }
+        // Siblings must be disjoint and appear in word order at every depth.
+        // The recursive differ slices the gaps between these intervals.
+        if segments[..index].iter().rev().find(|old| old.parent == segment.parent)
+            .is_some_and(|old| segment.word_start < old.word_end) {
+            return false;
+        }
+        if let Some(parent) = segment.parent {
+            let Some(parent) = segments[..index].iter().find(|old| old.id == parent) else {
+                return false;
+            };
+            if segment.word_start < parent.word_start || segment.word_end > parent.word_end {
+                return false;
+            }
+        } else {
+            if segment.word_start < end {
+                return false;
+            }
+            end = segment.word_end;
+        }
+    }
+    true
+}
+
+fn remaining_words(words: &[u32], segments: &[&DrawSegment]) -> (Vec<u32>, Vec<usize>) {
+    let mut remainder = Vec::new();
+    let mut offsets = Vec::with_capacity(segments.len());
+    let mut end = 0;
+    for segment in segments {
+        remainder.extend_from_slice(&words[end..segment.word_start]);
+        offsets.push(remainder.len());
+        end = segment.word_end;
+    }
+    remainder.extend_from_slice(&words[end..]);
+    (remainder, offsets)
+}
+
+fn segmented_damage<const MAX_REGIONS: usize>(
+    ui: &impl RenderResources,
+    previous: &[u32],
+    current: &[u32],
+    previous_segments: &[DrawSegment],
+    current_segments: &[DrawSegment],
+    screen: DamageRect,
+    previous_clip: DamageRect,
+    current_clip: DamageRect,
+    #[cfg(feature = "counters")] counters: &core::cell::Cell<crate::counters::DamageCounters>,
+) -> Result<DamagePlan<MAX_REGIONS>, DamageError> {
+    // Outer revisions cover their nested regions. Taking only outer intervals
+    // avoids decoding or damaging a nested operation twice.
+    let old: Vec<_> = previous_segments.iter().filter(|s| s.parent.is_none()).collect();
+    let new: Vec<_> = current_segments.iter().filter(|s| s.parent.is_none()).collect();
+    let (old_remainder, old_offsets) = remaining_words(previous, &old);
+    let (new_remainder, new_offsets) = remaining_words(current, &new);
+    let mut damage = clipped_draw_list_damage(
+        ui, &old_remainder, &new_remainder, screen, previous_clip, current_clip,
+        #[cfg(feature = "counters")]
+        counters,
+    )?;
+    if damage.is_full_redraw() {
+        return Ok(damage);
+    }
+    let mut reordered = DamageRect::empty();
+    for (old_index, before) in old.iter().enumerate() {
+        let Some(new_index) = new.iter().position(|after| after.id == before.id) else {
+            damage.add(before.bounds, screen);
+            continue;
+        };
+        let after = new[new_index];
+        // Compare relative order, not the absolute index: inserting one card
+        // must not mark every following card as reordered.
+        let order_changed = old.iter().enumerate().any(|(other_index, other)| {
+            new.iter().position(|s| s.id == other.id).is_some_and(|position| {
+                (other_index < old_index) != (position < new_index)
+            })
+        }) || old_offsets[old_index] != new_offsets[new_index];
+        if order_changed {
+            reordered = reordered.union(before.bounds).union(after.bounds);
+            damage.add(before.bounds, screen);
+            damage.add(after.bounds, screen);
+        } else if before.placement != after.placement || before.clip != after.clip {
+            damage.add(before.bounds, screen);
+            damage.add(after.bounds, screen);
+        } else if before.revision != after.revision {
+            if let (Some(old), Some(new)) = (before.patch_bounds, after.patch_bounds) {
+                damage.add(old, screen);
+                damage.add(new, screen);
+                continue;
+            }
+            let old_children = descendant_segments(previous_segments, before);
+            let new_children = descendant_segments(current_segments, after);
+            let local: DamagePlan<MAX_REGIONS> = if old_children.is_empty() && new_children.is_empty() {
+                clipped_draw_list_damage(
+                    ui, &previous[before.word_start..before.word_end],
+                    &current[after.word_start..after.word_end], screen, before.clip, after.clip,
+                    #[cfg(feature = "counters")]
+                    counters,
+                )?
+            } else {
+                segmented_damage(
+                    ui, &previous[before.word_start..before.word_end],
+                    &current[after.word_start..after.word_end], &old_children, &new_children,
+                    screen, before.clip, after.clip,
+                    #[cfg(feature = "counters")]
+                    counters,
+                )?
+            };
+            if local.is_full_redraw() {
+                damage.add(before.bounds, screen);
+                damage.add(after.bounds, screen);
+            } else {
+                for rect in local.regions() {
+                    damage.add(*rect, screen);
+                }
+            }
+        }
+    }
+    for after in &new {
+        if !old.iter().any(|before| before.id == after.id) {
+            damage.add(after.bounds, screen);
+        }
+    }
+    if !reordered.is_empty() {
+        for segment in old.iter().chain(new.iter()) {
+            if !segment.bounds.intersect(reordered).is_empty() {
+                damage.add(segment.bounds, screen);
+            }
+        }
+    }
+    Ok(damage)
+}
+
+fn descendant_segments(segments: &[DrawSegment], parent: &DrawSegment) -> Vec<DrawSegment> {
+    let mut children: Vec<DrawSegment> = Vec::new();
+    for segment in segments {
+        if segment.parent == Some(parent.id)
+            || segment.parent.is_some_and(|id| children.iter().any(|child| child.id == id))
+        {
+            let mut child = *segment;
+            child.word_start -= parent.word_start;
+            child.word_end -= parent.word_start;
+            if child.parent == Some(parent.id) { child.parent = None; }
+            children.push(child);
+        }
+    }
+    children
+}
+
 fn validate_draw_list(
     ui: &impl RenderResources,
     words: &[u32],
     screen: DamageRect,
+    #[cfg(feature = "counters")] counters: &core::cell::Cell<crate::counters::DamageCounters>,
 ) -> Result<(), DamageError> {
-    let mut decoder = DamageDecoder::new(words, screen);
+    let mut decoder = DamageDecoder::new(
+        words, screen,
+        #[cfg(feature = "counters")]
+        counters,
+    );
     while decoder
         .next(ui)
         .map_err(|_| DamageError::MalformedDrawList)?
@@ -534,6 +780,27 @@ fn validate_draw_list(
         Ok(())
     } else {
         Err(DamageError::MalformedDrawList)
+    }
+}
+
+/// Conservative painted bounds for a scissor-balanced region slice.
+pub(crate) fn slice_bounds(
+    ui: &impl RenderResources, words: &[u32], screen: DamageRect, clip: DamageRect,
+) -> DamageRect {
+    #[cfg(feature = "counters")]
+    let counters = core::cell::Cell::new(crate::counters::DamageCounters::ZERO);
+    let mut decoder = DamageDecoder::new(words, screen,
+        #[cfg(feature = "counters")]
+        &counters,
+    );
+    decoder.clip = clip;
+    let mut bounds = DamageRect::empty();
+    loop {
+        match decoder.next(ui) {
+            Ok(Some(op)) => bounds = bounds.union(op.bounds),
+            Ok(None) => return bounds,
+            Err(()) => return screen,
+        }
     }
 }
 

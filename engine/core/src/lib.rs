@@ -38,9 +38,14 @@ use alloc::vec::Vec;
 
 pub mod anim;
 pub mod codec;
+#[cfg(feature = "counters")]
+pub mod counters;
 pub mod damage;
 pub mod draw;
 pub mod layout;
+mod layout_regions;
+pub use layout_regions::RegionLayoutGuard;
+pub mod specialization;
 pub mod package;
 pub mod pak;
 pub mod raster;
@@ -49,6 +54,7 @@ pub mod spec;
 pub mod stream;
 pub mod stream_rx;
 pub mod style;
+mod shaped_size_cache;
 pub mod text;
 pub mod font_pages;
 pub mod font_stream;
@@ -251,9 +257,11 @@ pub struct Ui {
     styles: style::StyleTable,
     fonts: text::Fonts,
     font_revisions: [u64; spec::MAX_FONT_SLOTS],
+    specialization_identity: Option<alloc::boxed::Box<specialization::AssetIdentities>>,
     anims: anim::Anims,
     timelines: Vec<TimelineInst>,
     layout: layout::LayoutEngine,
+    layout_regions: Option<alloc::boxed::Box<layout_regions::LayoutRegions>>,
     auxiliary: Option<AuxiliarySurface>,
     /// Generation-tagged texture slots (handles per spec.ts TEX_SLOT_BITS).
     textures: Vec<TexSlot>,
@@ -269,6 +277,7 @@ pub struct Ui {
     raster_revision: u64,
     focused: i32,
     draw_list: DrawList,
+    draw_cache_budget: usize,
     /// Virtual cursor sprite (spec ops 28/29, input.cursor capability):
     /// texture handle (< 0 = hidden), hotspot offset into the sprite,
     /// logical draw size (0 = the texture's own pixel size), and the
@@ -341,9 +350,11 @@ impl Ui {
             styles: style::StyleTable::new(),
             fonts: text::Fonts::new(),
             font_revisions: [0; spec::MAX_FONT_SLOTS],
+            specialization_identity: None,
             anims: anim::Anims::new(),
             timelines: Vec::new(),
             layout: layout::LayoutEngine::new(),
+            layout_regions: None,
             auxiliary: None,
             textures: Vec::new(),
             tex_free: Vec::new(),
@@ -352,6 +363,7 @@ impl Ui {
             raster_revision: 1,
             focused: 0,
             draw_list: DrawList::new(),
+            draw_cache_budget: 64 * 1024,
             cursor_tex: -1,
             cursor_hot: (0.0, 0.0),
             cursor_size: (0.0, 0.0),
@@ -400,19 +412,159 @@ impl Ui {
 
     fn bump_raster_revision(&mut self) {
         self.raster_revision = self.raster_revision.wrapping_add(1);
+        self.draw_list.invalidate_all();
     }
 
-    fn mark_layout_dirty(&mut self) {
+    fn mark_output_layout_dirty(&mut self) {
         self.layout.dirty = true;
         if let Some(auxiliary) = self.auxiliary.as_mut() {
             auxiliary.layout.dirty = true;
         }
     }
 
+    fn mark_layout_dirty(&mut self) {
+        self.draw_list.invalidate_all();
+        self.mark_output_layout_dirty();
+        if let Some(regions) = &mut self.layout_regions { regions.mark_all(); }
+    }
+
+    fn mark_layout_structure_at(&mut self, parent: i32) {
+        self.draw_list.invalidate_node(&self.tree, parent);
+        if let Some(regions) = &mut self.layout_regions {
+            regions.mark_structure(&self.tree, parent);
+            if let Some(auxiliary) = &mut self.auxiliary { auxiliary.layout.dirty = true; }
+        } else {
+            self.mark_output_layout_dirty();
+        }
+    }
+
     fn mark_layout_style(&mut self, slot: u32) {
-        self.layout.mark_style(slot);
+        self.draw_list.invalidate_node(&self.tree, self.tree.slots[slot as usize].id(slot));
+        self.mark_layout_style_only(slot);
+    }
+
+    fn mark_layout_state(&mut self, slot: u32) {
+        self.draw_list.invalidate_state(&self.tree, self.tree.slots[slot as usize].id(slot));
+        self.mark_layout_style_only(slot);
+    }
+
+    fn mark_layout_style_only(&mut self, slot: u32) {
+        if let Some(regions) = &mut self.layout_regions {
+            regions.mark_style(&self.tree, slot);
+        } else {
+            self.layout.mark_style(slot);
+        }
         if let Some(auxiliary) = self.auxiliary.as_mut() {
             auxiliary.layout.mark_style(slot);
+        }
+    }
+
+    fn discard_layout_regions(&mut self) {
+        self.draw_list.clear_regions();
+        if let Some(regions) = self.layout_regions.take() {
+            #[cfg(feature = "counters")]
+            self.layout.counters.add_work(regions.counters());
+            #[cfg(not(feature = "counters"))]
+            drop(regions);
+            self.mark_output_layout_dirty();
+        }
+    }
+
+    /// Enable an independent layout tree for a proven fixed-size subtree.
+    /// This native-only API is absent from the guest operation protocol.
+    /// Text roots, detached roots, auxiliary output, and native text hosts use
+    /// the general solver. Invalid isolation claims assert in debug builds.
+    pub fn set_layout_region(&mut self, node: i32, enabled: bool) -> bool {
+        if !enabled {
+            self.draw_list.invalidate_node(&self.tree, node);
+            self.draw_list.set_region(node, false, self.draw_cache_budget);
+            if let Some(regions) = &mut self.layout_regions {
+                regions.remove(node);
+                if regions.is_empty() { self.discard_layout_regions(); }
+            }
+            return true;
+        }
+        if self.fonts.native_active() || node == spec::ROOT_ID
+            || !self.tree.is_in_subtree(spec::ROOT_ID, node)
+            || self.tree.get(node).is_none_or(|node| node.node_type == spec::NodeType::Text as u8) {
+            return false;
+        }
+        let isolated = layout_regions::isolated(&self.tree, &self.styles, node);
+        debug_assert!(isolated, "layout region requires fixed pixel axes, grow=shrink=0, compatible basis and min/max");
+        if !isolated { return false; }
+        if self.is_layout_region(node) { return true; }
+        self.draw_list.invalidate_node(&self.tree, node);
+        if self.layout_regions.is_none() {
+            self.layout_regions = Some(alloc::boxed::Box::new(layout_regions::LayoutRegions::new()));
+            self.layout.taffy.clear();
+            self.layout.root = None;
+            self.layout.built = false;
+            self.layout.dirty = false;
+            self.layout.style_dirty.clear();
+            #[cfg(feature = "counters")]
+            { self.layout.counters.taffy_nodes = 0; }
+        }
+        self.layout_regions.as_mut().unwrap().insert(node);
+        self.draw_list.set_region(node, true, self.draw_cache_budget);
+        true
+    }
+
+    /// Queue a complete layout table for the first solve of a registered region.
+    /// The generated caller guarantees all internal geometry matches its build
+    /// environment. Parent raw size/origin must match the guard when consumed;
+    /// otherwise this falls back to live solving. The root placement is kept
+    /// from the parent solver. Later geometry changes use the live solver.
+    pub fn set_region_layout(&mut self, root: i32, guard: RegionLayoutGuard, rects: &[(i32, tree::LayoutRect)]) -> bool {
+        let Some(regions) = &mut self.layout_regions else { return false; };
+        regions.set_baked(&self.tree, &self.styles, root, guard, rects)
+    }
+
+    /// Raw parent-solver dimensions and cumulative origin from the last solve.
+    pub fn layout_region_guard(&self, root: i32) -> Option<RegionLayoutGuard> {
+        self.layout_regions.as_ref()?.guard(root)
+    }
+
+    /// Maximum cached DrawList word bytes for native specialization regions.
+    /// Zero preserves region damage metadata while generating words each draw.
+    pub fn set_draw_cache_budget(&mut self, bytes: usize) {
+        self.draw_cache_budget = bytes;
+        let roots: Vec<_> = self.layout_region_roots().collect();
+        for root in roots { self.draw_list.set_region(root, true, bytes); }
+    }
+
+    pub fn draw_segments(&self) -> &[resources::DrawSegment] { self.draw_list.segments() }
+
+    /// Attach a compiler-proven static table after initial node values settle.
+    pub fn set_region_draw_plan(&mut self, node: i32, plan: &'static draw::StaticDrawPlan) -> bool {
+        if !self.is_layout_region(node) { return false; }
+        self.draw_list.invalidate_node(&self.tree, node);
+        self.draw_list.set_static_plan(node, plan)
+    }
+
+    pub fn is_layout_region(&self, node: i32) -> bool {
+        self.layout_regions.as_ref().is_some_and(|regions| regions.contains(node))
+    }
+
+    /// Return all native specialization regions to the general layout path.
+    pub fn disable_layout_regions(&mut self) { self.discard_layout_regions(); }
+
+    pub(crate) fn layout_region_roots(&self) -> impl Iterator<Item = i32> + '_ {
+        self.layout_regions.iter().flat_map(|regions| regions.roots())
+    }
+
+    fn relayout_primary(&mut self) {
+        if let Some(regions) = &mut self.layout_regions {
+            if !regions.needs() { return; }
+            if regions.valid(&self.tree, &self.styles, &self.fonts) {
+                regions.relayout(&mut self.tree, &self.styles, &self.fonts, self.layout.viewport);
+                return;
+            }
+            // Dynamic host changes can invalidate an established boundary.
+            // Keep the retained tree and re-enter the original solver.
+            self.discard_layout_regions();
+        }
+        if self.layout.needs() {
+            layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
         }
     }
 
@@ -487,6 +639,8 @@ impl Ui {
         if self.focused != 0 && self.tree.is_in_subtree(id, self.focused) {
             self.focused = 0;
         }
+        let parent = self.tree.get(id).map_or(0, |node| node.parent);
+        self.mark_layout_structure_at(parent);
         self.tree.detach(id);
         let mut slots = Vec::new();
         self.tree.collect_subtree(id, &mut slots);
@@ -495,7 +649,10 @@ impl Ui {
             self.anims.kill_node(nid);
             self.tree.free_slot(slot);
         }
-        self.mark_layout_dirty();
+        if let Some(regions) = &mut self.layout_regions {
+            regions.remove_destroyed(&self.tree);
+            if regions.is_empty() { self.discard_layout_regions(); }
+        }
     }
 
     /// Insert `child` under `parent` before `anchor` (0 = append). DOM move
@@ -504,8 +661,18 @@ impl Ui {
         if child == self.auxiliary_surface_root() {
             return;
         }
-        if self.tree.insert_before(parent, child, anchor) {
-            self.mark_layout_dirty();
+        self.draw_list.invalidate_node(&self.tree, parent);
+        let previous = self.tree.get(child).map_or(0, |node| node.parent);
+        self.draw_list.invalidate_node(&self.tree, previous);
+        if let Some(regions) = &mut self.layout_regions {
+            let previous = self.tree.get(child).map_or(0, |node| node.parent);
+            if self.tree.insert_before(parent, child, anchor) {
+                regions.mark_structure(&self.tree, previous);
+                regions.mark_structure(&self.tree, parent);
+                if let Some(auxiliary) = &mut self.auxiliary { auxiliary.layout.dirty = true; }
+            }
+        } else if self.tree.insert_before(parent, child, anchor) {
+            self.mark_output_layout_dirty();
         }
     }
 
@@ -513,7 +680,7 @@ impl Ui {
     /// during reorder; the JS renderer sweep destroys still-detached nodes).
     pub fn remove_child(&mut self, parent: i32, child: i32) {
         if self.tree.remove_child(parent, child) {
-            self.mark_layout_dirty();
+            self.mark_layout_structure_at(parent);
         }
     }
 
@@ -588,6 +755,8 @@ impl Ui {
         tree::Node::put_entry(&mut node.overrides, prop, bits);
         if spec::is_layout_dirtying(prop) {
             self.mark_layout_style(slot);
+        } else {
+            self.draw_list.invalidate_prop(&self.tree, id, prop);
         }
     }
 
@@ -620,7 +789,8 @@ impl Ui {
         run.clear();
         self.tree.collect_run(root_slot, &mut run);
         if was_empty != run.is_empty() {
-            self.mark_layout_dirty();
+            let root_id = self.tree.slots[root_slot as usize].id(root_slot);
+            self.mark_layout_structure_at(root_id);
         } else if !run.is_empty() {
             // A text swap inside a FIXED cell (definite px width AND height
             // on the layout leaf) cannot move layout — the measure result is
@@ -632,7 +802,11 @@ impl Ui {
                 r.width.is_finite() && r.width >= 0.0 && r.height.is_finite() && r.height >= 0.0;
             if !fixed {
                 self.mark_layout_style(root_slot);
+            } else {
+                self.draw_list.invalidate_node(&self.tree, id);
             }
+        } else {
+            self.draw_list.invalidate_node(&self.tree, id);
         }
     }
 
@@ -851,6 +1025,7 @@ impl Ui {
         let Some(slot) = self.tree.resolve(id) else {
             return;
         };
+        self.draw_list.invalidate_node(&self.tree, id);
         let node = &mut self.tree.slots[slot as usize];
         if node.node_type == spec::NodeType::Image as u8 {
             node.tex = if tex < 0 { -1 } else { tex };
@@ -865,6 +1040,7 @@ impl Ui {
         let Some(slot) = self.tree.resolve(id) else {
             return;
         };
+        self.draw_list.invalidate_node(&self.tree, id);
         let node = &mut self.tree.slots[slot as usize];
         if node.node_type != spec::NodeType::Surface as u8 {
             return;
@@ -962,6 +1138,7 @@ impl Ui {
         let Some(slot) = self.tree.resolve(id) else {
             return;
         };
+        self.draw_list.invalidate_node(&self.tree, id);
         let node = &mut self.tree.slots[slot as usize];
         if node.node_type != spec::NodeType::Image as u8 {
             return;
@@ -978,12 +1155,56 @@ impl Ui {
         node.sprite_start = frame;
     }
 
+    /// Opt in before loading assets; identities are not reconstructed for
+    /// previously loaded slots. Ordinary hosts never allocate or hash here.
+    pub fn enable_font_identity(&mut self) {
+        if self.specialization_identity.is_none() {
+            self.specialization_identity = Some(alloc::boxed::Box::default());
+        }
+    }
+
+    pub fn font_atlas_identity(&self, slot: u8) -> Option<specialization::ContentHash> {
+        self.specialization_identity.as_ref()?.font(slot)
+    }
+
+    pub fn styles_identity(&self) -> Option<specialization::ContentHash> {
+        self.specialization_identity.as_ref()?.styles()
+    }
+
+    pub fn native_text_active(&self) -> bool { self.fonts.native_active() }
+
+    pub fn font_atlas_is_streamed(&self, slot: u8) -> bool {
+        self.fonts.atlas(slot).is_some_and(|atlas| atlas.stream.is_some())
+    }
+
+    /// Configure an opt-in native-code text size cache. Reconfiguration clears
+    /// all entries. Ordinary guest execution leaves this disabled.
+    pub fn set_shaped_size_cache_budget(&mut self, bytes: usize) {
+        self.fonts.set_shaped_size_cache_budget(bytes);
+    }
+
+    /// Prefill a size computed against the active baked atlas revision. The
+    /// caller's environment contract must guarantee the size matches the key.
+    pub fn cache_shaped_size(&mut self, slot: u8, revision: u64, text: &str, tracking: f32, line_height: f32, size: (f32, f32)) -> bool {
+        if self.font_revisions.get(slot as usize).copied() != Some(revision) { return false; }
+        self.fonts.cache_shaped_size(slot, revision, text, tracking, line_height, size)
+    }
+
+    pub fn shaped_size_cache_bytes(&self) -> usize { self.fonts.shaped_size_cache_bytes() }
+
+    /// Explicit baked-provider measurement for native specialization tooling.
+    /// This does not use the cache and does not change the guest operation set.
+    pub fn shaped_text_size(&self, text: &str, slot: u8, tracking: f32, line_height: f32) -> (f32, f32) {
+        self.fonts.measure_run_provider(false, text, slot, tracking, line_height)
+    }
+
     /// Parse a styles.bin blob (spec.ts STYLE TABLE format). Replaces the
     /// current table. Returns false on bad magic/version.
     pub fn load_styles(&mut self, bytes: &[u8]) -> bool {
         match style::StyleTable::parse(bytes) {
             Some(t) => {
                 self.styles = t;
+                if let Some(identity) = &mut self.specialization_identity { identity.record_styles(bytes); }
                 self.mark_layout_dirty();
                 self.bump_raster_revision();
                 true
@@ -998,6 +1219,7 @@ impl Ui {
         let ok = self.fonts.load(bytes);
         if ok {
             let slot = bytes[12] as usize;
+            if let Some(identity) = &mut self.specialization_identity { identity.record_font(slot as u8, bytes); }
             self.font_revisions[slot] = self.font_revisions[slot].wrapping_add(1);
             self.mark_layout_dirty();
             self.bump_raster_revision();
@@ -1025,6 +1247,7 @@ impl Ui {
         let Some(slot) = self.tree.resolve(id) else {
             return -1;
         };
+        self.draw_list.invalidate_node(&self.tree, id);
         let kind = spec::PROP_VALUE_KIND[prop as usize];
         let is_color = kind == spec::value_kind::COLOR;
         let from =
@@ -1088,6 +1311,7 @@ impl Ui {
             let t = &self.anims.tracks[tslot as usize];
             (t.node, t.prop)
         };
+        self.draw_list.invalidate_node(&self.tree, node_id);
         if let Some(slot) = self.tree.resolve(node_id) {
             let node = &mut self.tree.slots[slot as usize];
             if let Some(cur) = tree::Node::find_entry(&node.anim_values, prop) {
@@ -1120,13 +1344,13 @@ impl Ui {
             let old = style::resolve(&self.tree.slots[slot as usize], &self.styles, true);
             self.tree.slots[slot as usize].focused = false;
             self.retarget(slot, &old, true);
-            self.mark_layout_style(slot);
+            self.mark_layout_state(slot);
         }
         if let Some(slot) = self.tree.resolve(target) {
             let old = style::resolve(&self.tree.slots[slot as usize], &self.styles, true);
             self.tree.slots[slot as usize].focused = true;
             self.retarget(slot, &old, true);
-            self.mark_layout_style(slot);
+            self.mark_layout_state(slot);
         }
     }
 
@@ -1154,7 +1378,7 @@ impl Ui {
         let old = style::resolve(&self.tree.slots[slot as usize], &self.styles, true);
         self.tree.slots[slot as usize].active = active;
         self.retarget(slot, &old, true);
-        self.mark_layout_style(slot);
+        self.mark_layout_state(slot);
     }
 
     // ---- virtual cursor (spec ops 27..29, input.cursor capability) ---------
@@ -1166,9 +1390,7 @@ impl Ui {
     /// current geometry — layout is a pure function of the tree, so running
     /// it early never changes what the next `draw()` shows.
     pub fn hit_test(&mut self, x: f32, y: f32) -> i32 {
-        if self.layout.needs() {
-            layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
-        }
+        self.relayout_primary();
         draw::hit_test(&self.tree, &self.styles, self.layout.viewport, x, y)
     }
 
@@ -1176,9 +1398,7 @@ impl Ui {
     /// containers claim their box — the touch hit FACT resolver (see
     /// draw::hit_test_bounds). Same relayout-if-dirty rule.
     pub fn hit_test_bounds(&mut self, x: f32, y: f32) -> i32 {
-        if self.layout.needs() {
-            layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
-        }
+        self.relayout_primary();
         draw::hit_test_bounds(&self.tree, &self.styles, self.layout.viewport, x, y)
     }
 
@@ -1231,9 +1451,7 @@ impl Ui {
     /// never issues a hit query on the touch path. Returns the number of
     /// entries written to `out` (parallel to `packed`, capped at 8).
     pub fn touch_hits(&mut self, packed: &[u32], out: &mut [i32; 8]) -> usize {
-        if self.layout.needs() {
-            layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
-        }
+        self.relayout_primary();
         let screen = self.layout.viewport;
         let tree = &self.tree;
         let styles = &self.styles;
@@ -1331,13 +1549,13 @@ impl Ui {
             }
             if spec::is_layout_dirtying(prop) {
                 self.mark_layout_style(slot);
+            } else {
+                self.draw_list.invalidate_node(&self.tree, node_id);
             }
         }
         self.anims.publish_completions();
         self.tick_timelines();
-        if self.layout.needs() {
-            layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
-        }
+        self.relayout_primary();
     }
 
     /// Advance every playing baked timeline one frame and write the sampled
@@ -1412,6 +1630,7 @@ impl Ui {
                 }
             }
             let mut layout_changed = false;
+            let mut paint_changed = false;
             {
                 let node = &mut self.tree.slots[slot as usize];
                 for &(prop, value) in &writes {
@@ -1419,12 +1638,14 @@ impl Ui {
                     match value {
                         Some(bits) => {
                             if prev != Some(bits) {
+                                paint_changed = true;
                                 tree::Node::put_entry(&mut node.anim_values, prop, bits);
                                 layout_changed |= spec::is_layout_dirtying(prop);
                             }
                         }
                         None => {
                             if prev.is_some() {
+                                paint_changed = true;
                                 tree::Node::remove_entry(&mut node.anim_values, prop);
                                 layout_changed |= spec::is_layout_dirtying(prop);
                             }
@@ -1434,6 +1655,8 @@ impl Ui {
             }
             if layout_changed {
                 self.mark_layout_style(slot);
+            } else if paint_changed {
+                self.draw_list.invalidate_node(&self.tree, node_id);
             }
             i = end;
         }
@@ -1474,9 +1697,7 @@ impl Ui {
     /// it. Output is valid until the next mutating call.
     pub fn draw(&mut self) -> &DrawList {
         self.fonts.stream_begin(self.frame);
-        if self.layout.needs() {
-            layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
-        }
+        self.relayout_primary();
         // Cursor sprite quad: resolved here so a texture freed after
         // set_cursor simply stops drawing (generation-tagged handles).
         let cursor = if self.cursor_tex >= 0 {
@@ -1530,7 +1751,7 @@ impl Ui {
             // accumulated down identical recursions), so the rebuilt record
             // matches the repaint's expectation by construction.
             self.mark_layout_dirty();
-            layout::relayout(&mut self.tree, &self.styles, &self.fonts, &mut self.layout);
+            self.relayout_primary();
             let retry = draw::build(
                 &self.tree,
                 &self.styles,
@@ -1556,6 +1777,61 @@ impl Ui {
             self.inspect_rect = target;
         }
         &self.draw_list
+    }
+
+    /// Work performed by the main and auxiliary outputs since the last reset.
+    #[cfg(feature = "counters")]
+    pub fn counters(&self) -> counters::CoreCounters {
+        let mut counts = counters::CoreCounters {
+            layout: self.layout.counters,
+            draw: self.draw_list.counters,
+        };
+        counts.draw.segment_table_bytes = self.draw_list.segment_table_bytes();
+        if let Some(regions) = &self.layout_regions { counts.layout.add(regions.counters()); }
+        if let Some(auxiliary) = &self.auxiliary {
+            let layout = auxiliary.layout.counters;
+            counts.layout.structure_rebuilds = counts.layout.structure_rebuilds.saturating_add(layout.structure_rebuilds);
+            counts.layout.style_updates = counts.layout.style_updates.saturating_add(layout.style_updates);
+            counts.layout.shaping_calls = counts.layout.shaping_calls.saturating_add(layout.shaping_calls);
+            counts.layout.shaping_cache_hits = counts.layout.shaping_cache_hits.saturating_add(layout.shaping_cache_hits);
+            counts.layout.taffy_nodes_created = counts.layout.taffy_nodes_created.saturating_add(layout.taffy_nodes_created);
+            counts.layout.taffy_nodes = counts.layout.taffy_nodes.saturating_add(layout.taffy_nodes);
+            let draw = auxiliary.draw_list.counters;
+            counts.draw.builds = counts.draw.builds.saturating_add(draw.builds);
+            counts.draw.ops = counts.draw.ops.saturating_add(draw.ops);
+            counts.draw.words = counts.draw.words.saturating_add(draw.words);
+            counts.draw.generated_words = counts.draw.generated_words.saturating_add(draw.generated_words);
+            counts.draw.static_plan_hits = counts.draw.static_plan_hits.saturating_add(draw.static_plan_hits);
+            counts.draw.region_cache_hits = counts.draw.region_cache_hits.saturating_add(draw.region_cache_hits);
+            counts.draw.region_cache_bytes = counts.draw.region_cache_bytes.saturating_add(draw.region_cache_bytes);
+            counts.draw.segment_table_bytes = counts.draw.segment_table_bytes.saturating_add(auxiliary.draw_list.segment_table_bytes());
+        }
+        counts.layout.shaping_cache_bytes = self.shaped_size_cache_bytes() as u64;
+        counts
+    }
+
+    /// Reset work totals while preserving live-node and cache-size gauges.
+    #[cfg(feature = "counters")]
+    pub fn reset_counters(&mut self) {
+        if let Some(regions) = &mut self.layout_regions { regions.reset_counters(); }
+        self.layout.counters = counters::LayoutCounters {
+            taffy_nodes: self.layout.counters.taffy_nodes,
+            ..Default::default()
+        };
+        self.draw_list.counters = counters::DrawCounters {
+            region_cache_bytes: self.draw_list.counters.region_cache_bytes,
+            ..Default::default()
+        };
+        if let Some(auxiliary) = &mut self.auxiliary {
+            auxiliary.layout.counters = counters::LayoutCounters {
+                taffy_nodes: auxiliary.layout.counters.taffy_nodes,
+                ..Default::default()
+            };
+            auxiliary.draw_list.counters = counters::DrawCounters {
+                region_cache_bytes: auxiliary.draw_list.counters.region_cache_bytes,
+                ..Default::default()
+            };
+        }
     }
 
     /// Return the DrawList most recently produced by [`draw`](Self::draw)

@@ -247,6 +247,7 @@ pub struct Fonts {
     native: Option<MeasureFn>,
     /// Native line wrapper (OP wrapText); absent = greedy over `measure_run`.
     wrap_native: Option<WrapFn>,
+    shaped_sizes: Option<alloc::boxed::Box<crate::shaped_size_cache::ShapedSizeCache>>,
 }
 
 impl Default for Fonts {
@@ -257,9 +258,10 @@ impl Default for Fonts {
 
 impl Fonts {
     pub(crate) fn merge_atlases(&mut self, staged: &mut Fonts) {
-        for (destination, source) in self.slots.iter_mut().zip(staged.slots.iter_mut()) {
+        for (slot, (destination, source)) in self.slots.iter_mut().zip(staged.slots.iter_mut()).enumerate() {
             if source.is_some() {
                 *destination = source.take();
+                if let Some(cache) = &mut self.shaped_sizes { cache.invalidate(slot as u8); }
             }
         }
     }
@@ -270,6 +272,7 @@ impl Fonts {
             misses: Cell::new(0),
             native: None,
             wrap_native: None,
+            shaped_sizes: None,
         }
     }
 
@@ -296,6 +299,7 @@ impl Fonts {
             Some(a) => {
                 let slot = a.slot as usize;
                 self.slots[slot] = Some(a);
+                if let Some(cache) = &mut self.shaped_sizes { cache.invalidate(slot as u8); }
                 true
             }
             None => false,
@@ -308,7 +312,33 @@ impl Fonts {
     }
 
     pub(crate) fn atlas_mut(&mut self, slot: u8) -> Option<&mut Atlas> {
+        if let Some(cache) = &mut self.shaped_sizes { cache.invalidate(slot); }
         self.slots.get_mut(slot as usize)?.as_mut()
+    }
+
+    pub(crate) fn set_shaped_size_cache_budget(&mut self, bytes: usize) {
+        self.shaped_sizes = crate::shaped_size_cache::ShapedSizeCache::new(bytes);
+    }
+
+    pub(crate) fn shaped_size_cache_bytes(&self) -> usize {
+        self.shaped_sizes.as_ref().map_or(0, |cache| cache.bytes())
+    }
+
+    pub(crate) fn cache_shaped_size(&mut self, slot: u8, revision: u64, text: &str, tracking: f32, line_height: f32, size: (f32, f32)) -> bool {
+        if self.native_active() || !tracking.is_finite() || !(line_height.is_nan() || line_height.is_finite() && line_height >= 0.0) || !size.0.is_finite() || !size.1.is_finite() || size.0 < 0.0 || size.1 < 0.0 {
+            return false;
+        }
+        let Some(atlas) = self.atlas(slot).filter(|atlas| atlas.stream.is_none()) else { return false; };
+        let misses = text.chars().filter(|&ch| ch != '\n' && atlas.lookup_entry(ch as u32).is_none()).count() as u32;
+        self.shaped_sizes.as_mut().is_some_and(|cache| cache.insert(slot, revision, text, tracking, line_height, size, misses))
+    }
+
+    pub(crate) fn cached_shaped_size(&self, slot: u8, text: &str, tracking: f32, line_height: f32) -> Option<(f32, f32)> {
+        let cache = self.shaped_sizes.as_ref()?;
+        if cache.is_empty() || self.native_active() || self.atlas(slot)?.stream.is_some() { return None; }
+        let (size, misses) = cache.lookup(slot, text, tracking, line_height)?;
+        self.misses.set(self.misses.get().wrapping_add(misses));
+        Some(size)
     }
 
     /// (gid, advance, xoff) for a codepoint; a miss resolves to gid 0 (tofu,
