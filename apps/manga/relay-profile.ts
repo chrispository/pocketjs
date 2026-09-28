@@ -12,6 +12,7 @@ export const CATALOG_NS = "manga/catalog", RECORDS_NS = "manga/records";
 export const PROGRESS_OP = "x.manga.library.progress";
 export const MAX_IMAGE_BYTES = 256 * 256 * 2;
 export const MAX_TEXT_BYTES = 4096;
+export const MANGA_RELAY_STALL_MS = 45000;
 export function mangaRelayLimits(lane = false): RelayRxLimits {
   return {
     maxWireBytes: lane ? RELAY_CHANNEL.recordBytes : 65536, maxMetaBytes: 2048,

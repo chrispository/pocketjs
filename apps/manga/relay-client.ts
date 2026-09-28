@@ -4,7 +4,7 @@ import { parseRelayJson } from "@pocketjs/framework/relay/frame";
 import { RELAY_CODEC, RELAY_DELIVERY, RELAY_ERROR, type RelayRxLimits } from "@pocketjs/framework/relay/spec";
 import { getOps } from "@pocketjs/framework/host";
 import type { OffloadResult } from "@pocketjs/framework/offload";
-import { CATALOG_NS, RECORDS_NS, MANGA_RELAY, MANGA_PRIVATE_OPS, MAX_IMAGE_BYTES, MAX_TEXT_BYTES, PROGRESS_OP, mangaRef, mangaRelayLimits } from "./relay-profile.ts";
+import { CATALOG_NS, RECORDS_NS, MANGA_RELAY, MANGA_PRIVATE_OPS, MANGA_RELAY_STALL_MS, MAX_IMAGE_BYTES, MAX_TEXT_BYTES, PROGRESS_OP, mangaRef, mangaRelayLimits } from "./relay-profile.ts";
 
 /** QuickJS timers are not wall-clock timers. Drive relay liveness at the
  * frame boundary and run only the jobs that were due when the frame began. */
@@ -53,6 +53,7 @@ export function createRelayMangaClient(options: {
     role: "guest", transport: options.transport,
     local: { app: MANGA_RELAY.app, versions: [[1, 0]], profiles: [MANGA_RELAY.profile], codecs: MANGA_RELAY.codecs, kinds: MANGA_RELAY.kinds, rxLimits: limits },
     privateOps: MANGA_PRIVATE_OPS, requestReserve: 1,
+    stallMs: MANGA_RELAY_STALL_MS,
     scheduler: options.scheduler ?? clock.scheduler,
     // Guest nonces distinguish boots; authentication is provided by the L0
     // pairing key. The companion generates cryptographic session identities.

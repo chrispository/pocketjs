@@ -4,7 +4,7 @@ import { RELAY_CODEC, RELAY_EFFECT, RELAY_ERROR, type RelayResourceRef } from "@
 import type { RelayEndpoint, RelayIncomingRequest } from "@pocketjs/framework/relay/endpoint";
 import type { RelayPeerContext } from "@pocketjs/framework/relay/session";
 import { serveRelayTcp, type RelayProviderHooks, type RelayProviderConnection } from "@pocketjs/framework/relay/wire";
-import { CATALOG_NS, RECORDS_NS, MANGA_RELAY, MANGA_PRIVATE_OPS, PROGRESS_OP, catalogRef, mangaRead, mangaRelayLimits, utf8 } from "../relay-profile.ts";
+import { CATALOG_NS, RECORDS_NS, MANGA_RELAY, MANGA_PRIVATE_OPS, MANGA_RELAY_STALL_MS, PROGRESS_OP, catalogRef, mangaRead, mangaRelayLimits, utf8 } from "../relay-profile.ts";
 import { workerBackend, type MangaBackend, type MangaReply } from "./backend.ts";
 
 interface Connection { endpoint?: RelayEndpoint; streams: Map<string, number>; announced: Map<number, string>; closed: boolean }
@@ -156,6 +156,7 @@ export async function serveMangaRelay(options: { root: string; key: string; port
   try {
     await authority.refresh();
     const wire = await serveRelayTcp({ host: options.host ?? "127.0.0.1", port: options.port ?? MANGA_RELAY.port,
+      stallMs: MANGA_RELAY_STALL_MS,
       local: { versions: [[1, 0]], profiles: [MANGA_RELAY.profile], codecs: MANGA_RELAY.codecs, kinds: MANGA_RELAY.kinds, rxLimits: mangaRelayLimits() },
       privateOps: MANGA_PRIVATE_OPS,
       authenticate: socket => {
