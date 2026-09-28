@@ -60,8 +60,12 @@ export async function main(args = process.argv.slice(2)) {
       try { relay = await serveMangaRelay({ root, port: relayPort, host: relayHost, key, log: console.error }); }
       catch (error) { companion.close(); throw error; }
       console.log(`Pocket Manga companion: ${companion.server.url}\nRelay: ${relayHost}:${relay.port}\nLibrary: ${root}\nPairing key: ${keyFile}`);
+      const slot = createHash("sha256").update("dev.pocket-stack.manga").digest("hex").slice(0, 16);
+      if (relayHost !== "127.0.0.1" && relayHost !== "localhost") {
+        console.log(`3DS Relay: copy ${keyFile} to sdmc:/pocketjs/offload/${slot}.key`);
+        console.log(`3DS Relay: write this computer's LAN IPv4${relayPort === 8742 ? "" : `:${relayPort}`} to sdmc:/pocketjs/relay/${slot}.host`);
+      }
       if (device) {
-        const slot = createHash("sha256").update("dev.pocket-stack.manga").digest("hex").slice(0, 16);
         console.log(`Pairing: copy ${keyFile} to sdmc:/pocketjs/offload/${slot}.key`);
         provider = connectOffloadProvider({ address: device, port: devicePort, key, worker: new URL("./companion/provider-worker.ts", import.meta.url), data: { root }, isolation: "process", log: console.log });
       }

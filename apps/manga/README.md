@@ -27,26 +27,29 @@ Companion 的管理网页默认使用 **127.0.0.1:8743**，Pocket Relay TCP 监�
 
 终端检测宿主的 `relayChannel`：存在时用 Pocket Relay，不存在时用 offload。Relay 提供书库订阅、资源版本与条件读取、分块图片、请求取消，以及进度备份操作。连接在 HELLO 前校验 64 个十六进制字符的配对密钥；此 TCP 试点不加密。需要网络上的 Relay 宿主访问时可指定 `--relay-host 0.0.0.0`。
 
-**PR #456 的 3DS/PSP 宿主尚未发布原生 Relay 通道。** 当前 3DS 使用下节的 offload 连接方式，选择规则与 Map 相同。实际 Relay TCP、编译后的 guest 和离线缓存链路有测试覆盖；构建 `.3dsx` 不代表真机已能通过 Relay 连接。
+Manga 的 3DS 构建包含原生 Relay 字节通道。配置了有效的配对密钥与 companion 地址后，3DS 主动连接 Relay；缺少任一配置文件时不发布 `relayChannel`，继续使用 offload。PSP 宿主仍需原生 Relay 通道。3DS 的原生 TCP、编译后的 guest 和离线缓存链路有测试覆盖；真机网络与帧率仍需设备验收。
 
 ## 连接 3DS
 
-停止已运行的 companion，再带设备地址启动。书库与任务记录保留。
+电脑与 3DS 接入同一可信局域网。启动允许局域网连接的 Relay，并构建 Manga：
 
 ```sh
-bun apps/manga/companion.ts --device 192.168.1.42
+bun apps/manga/companion.ts --relay-host 0.0.0.0
 bun tools/3ds.ts manga
 ```
 
-启动日志会给出配对文件位置。首次运行会生成 `<companion root>/pairing.key`，将其原样复制到：
+启动日志会给出配对文件位置。首次运行会生成 `<companion root>/pairing.key`。将其原样复制到 SD，并写入电脑的局域网 IPv4 地址：
 
 ```text
 sdmc:/pocketjs/offload/b4da3f33b88e66e6.key
+sdmc:/pocketjs/relay/b4da3f33b88e66e6.host    内容如 192.168.1.10
 ```
 
-然后启动 `dist/3ds/manga-main.3dsx`。设备和 companion 应位于同一可信局域网；offload 使用设备 TCP 8741，配对密钥按应用隔离，传输不加密。自定义配对文件用 `--key-file FILE`，端口用 `--device-port PORT`。设备在启动时读取密钥；复制后需要重启应用。
+`.host` 也接受 `IPv4:端口`，默认端口 8742；自定义端口与 companion 的 `--relay-port` 保持一致。然后启动 `dist/3ds/manga-main.3dsx`。3DS 在启动时读取两个文件；修改后需要重启应用。配对密钥按应用隔离，Relay TCP 传输不加密。
 
-**不要求 companion 一直在线。** 缺少配对文件或网络时，应用仍会启动并读取本地资源。旧版本的 `manga-index.prp` 和 `manga-<slug>.prp` 保持可读。
+旧 offload 连接仍可使用：删除或暂时移走 `.host` 文件，启动 `bun apps/manga/companion.ts --device <3DS 的 IP>`。offload 使用设备 TCP 8741，`--device-port` 可改端口。两种连接共用上述密钥文件，书库与缓存无需迁移。
+
+**不要求 companion 一直在线。** 网络断开后，Relay 保持离线状态，应用仍会读取本地资源并在恢复连接后重新握手。旧版本的 `manga-index.prp` 和 `manga-<slug>.prp` 保持可读。
 
 ## 缓存与离线阅读
 

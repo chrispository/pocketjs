@@ -33,7 +33,7 @@
 - `packs/` 保存预处理版本与目录包。发布目录之前，版本包必须写入完成。
 - `.relay.lock` 限制同一书库只有一个发布进程；provider 使用独立的 SQLite 连接。
 - `import-*` 是导入临时目录。导入运行在子进程中，完成或子进程退出后清理。重启将未完成任务标为失败，用户可重试。
-- `pairing.key` 是应用配对密钥。管理 HTTP 默认绑定 `127.0.0.1:8743`；Relay 默认监听 `127.0.0.1:8742`。Relay 在 HELLO 前读取并校验 64 字符配对密钥，认证后授予 `pocket-manga` 访问权。3DS offload 沿用按应用隔离的密钥文件。
+- `pairing.key` 是应用配对密钥。管理 HTTP 默认绑定 `127.0.0.1:8743`；Relay 默认监听 `127.0.0.1:8742`。Relay 在 HELLO 前读取并校验 64 字符配对密钥，认证后授予 `pocket-manga` 访问权。3DS Relay 与 offload 共用按应用隔离的密钥文件；Relay 的 companion IPv4 地址保存在同一应用槽位的 `.host` 文件。
 
 **资源版本名包含作品身份、处理版本、元数据与下载内容的哈希。** 相同图片属于不同作品时不会复用另一作品的元数据；更新后的包不会覆盖旧版本的纹理地址。旧版本保留，直到用户在 companion 文件目录中清理不再使用的包。
 
@@ -102,7 +102,7 @@ Companion 网页图片使用 ETag；未变化的预览返回 304，不重复生�
 
 进度使用协商后的 `x.manga.library.progress` 幂等操作，调用同一套持久化进度拼接逻辑。终端 Relay 的超时在帧边界按时间检查，不依赖 QuickJS 的微任务计时器；UTF-8、十六进制和 JSON 编解码不依赖浏览器或 Node 全局变量。
 
-**3DS/PSP 当前未发布原生 Relay L0 通道。** 这些宿主走已有 offload；终端的 Relay 选择、缓存和无浏览器全局变量的启动通过编译后的 guest 测试验证。
+**3DS Manga 构建包含原生 Relay L0 通道。** `hosts/3ds/src/relay.c` 从应用槽位的密钥与 `.host` 文件读取配置，在 worker 上连接 companion 的 TCP 8742，先发送 64 字符密钥，再交换完整 Relay record。两个方向各有 8 个固定槽位、64 KiB 窗口，单条最多 16 KiB；QuickJS 帧每方向最多交付 2 条。`send()` 在槽位或字节预算不足时返回 false，不接管待重试的 record。重连和 guest 重载会更换连接代数，旧 record 由消费端丢弃。缺少有效配置时宿主不发布 `relayChannel`，Manga 沿用 offload。PSP 仍使用 offload。
 
 ## 请求与恢复
 
@@ -117,6 +117,6 @@ offload 请求受 8 个槽位、每帧提交/交付和响应大小上限约束�
 
 ## 验证边界
 
-Bun 测试覆盖实际配对 TCP Relay、隔离 worker、分块图像、条件读取、书库推送、取消与认证关闭，并覆盖源目录、请求边界、后台导入、真实图片烘焙与 PRP 回读、SD 导出、重启、目录中断、写入失败、离线版本保留和票据回收。原生 C fixture 执行实际的 asset worker，使用 AddressSanitizer/UndefinedBehaviorSanitizer 验证读写、缓存覆盖、删除、CRC 和代际隔离。进度存储 fixture 验证备份恢复。
+Bun 测试覆盖实际配对 TCP Relay、隔离 worker、分块图像、条件读取、书库推送、取消与认证关闭，并覆盖源目录、请求边界、后台导入、真实图片烘焙与 PRP 回读、SD 导出、重启、目录中断、写入失败、离线版本保留和票据回收。原生 C fixture 执行 Relay TCP worker 的配对、拆包、合包、限额与重连，以及 asset worker 的读写、缓存覆盖、删除、CRC 和代际隔离；这些 fixture 使用 AddressSanitizer/UndefinedBehaviorSanitizer。进度存储 fixture 验证备份恢复。
 
 完整 `.3dsx` 构建验证 C/Rust/QuickJS 连接；编译后的 guest 可通过模拟 host 检查按键、排序和保存行为。**这些检查不代表 3DS 真机帧率、SD 性能或触摸手感已验收。** 当前宿主没有通用 CJK 字形缓存，终端标题仍受烘焙字体覆盖范围限制。
