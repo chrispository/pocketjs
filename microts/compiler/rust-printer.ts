@@ -140,7 +140,7 @@ class Printer {
       case "extern": return `extern crate ${rustIdentifier(i.name)};`;
       case "use": return `${pub_}use ${path(i.path)}${i.names ? `::{${i.names.map(n => n === "*" ? "*" : rustIdentifier(n)).join(", ")}}` : ""};`;
       case "mod": return `${pub_}mod ${rustIdentifier(i.name)};`;
-      case "const": return `${pub_}const ${rustIdentifier(i.name)}: ${type(i.type)} = ${this.expression(i.value)};`;
+      case "const": return `${pub_}${i.storage ?? "const"} ${rustIdentifier(i.name)}: ${type(i.type)} = ${this.expression(i.value)};`;
       case "typeAlias": return `${pub_}type ${rustIdentifier(i.name)}${generics(i.generics)} = ${type(i.type)};`;
       case "fn": return this.fn(i);
       case "struct": return derives + `${pub_}struct ${rustIdentifier(i.name)}${generics(i.generics)}` + (i.tuple ? `(${i.tuple.map(t => `${pub_}${type(t)}`).join(", ")});` : ` {\n${(i.fields ?? []).map(f => `    ${f.public ? "pub " : ""}${rustIdentifier(f.name)}: ${type(f.type)},`).join("\n")}\n}`);

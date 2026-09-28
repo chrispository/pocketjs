@@ -2,7 +2,7 @@
 import { checkAotVersion, type AotHandler } from "./aot-ir.ts";
 import type { AotComponent, AotProgram } from "./aot-ir.ts";
 import type { RustExpr, RustFunction, RustGeneric, RustItem, RustParam, RustStatement, RustType } from "./rust-ast.ts";
-import { rb, rc, re, ref, rf, rm, rn, rp, rr, rt } from "./rust-ast.ts";
+import { rb, rc, re, ref, rf, rl, rm, rn, rp, rr, rt } from "./rust-ast.ts";
 import { MOTION_LEVELS, MOTION_VALUES } from "../../contracts/spec/motion.ts";
 
 /** Distinct fusion levels required by the subscribed motion values, ascending. */
@@ -18,7 +18,7 @@ const receiver = (): RustParam => parameter("self", rr(rt("Self"), true));
  * update method. Its anonymous lifetime becomes the application's lifetime:
  * stored props borrow application-owned data without copying strings or lists.
  */
-export function generateAotApp(root: AotComponent, propsType: RustType, demands?: AotProgram["demands"], stateful = false, lifecycle = false, version: AotProgram["version"] = 1, modelProtocol = false, asyncDispatch = false): RustItem[] {
+export function generateAotApp(root: AotComponent, propsType: RustType, demands?: AotProgram["demands"], stateful = false, lifecycle = false, version: AotProgram["version"] = 1, modelProtocol = false, asyncDispatch = false, specializedView = false, hasTopViewBindings = false, specializationContract = false, bakedText?: { target: string; budget: number }): RustItem[] {
   checkAotVersion({ version });
   let borrowsProps = false;
   function storedType(type: RustType): RustType {
@@ -64,6 +64,7 @@ export function generateAotApp(root: AotComponent, propsType: RustType, demands?
   const updateView = () => re(rm(field("view"), "update", rm(field("host"), "ui_mut"), ref(field("props")), ref(field("model")), ...slots,
     ...(root.slotProps?.some(slot => slot.parameters.length) ? [ref({ kind: "closure", params: [rn("_ui"), rn("_id"), rn("_arguments")], body: { kind: "tuple", elements: [] } }, true)] : []),
     ...(lifecycle ? [ref(field("lifecycle"))] : []),
+    ...(specializedView ? [rp("__view_force")] : []),
   ));
   const modelRegions = rf(field("lifecycle"), "models");
   const phase = (name: string): RustExpr => rm(modelRegions, "run", rp("microts", "ModelPhase", name), ref(rp("ready")), ref(field("commands"), true));
@@ -77,6 +78,7 @@ export function generateAotApp(root: AotComponent, propsType: RustType, demands?
       params: [parameter("host", rt("H"), true), parameter("props", props), parameter("model", rt("M"), modelProtocol), ...slotNames.map(name => parameter(name, slotType))],
       returns: rt("Self"),
       body: rb([
+        ...(specializationContract ? [re(rc(rp("prepare_specialization"), rm(rp("host"), "ui_mut")))] : []),
         ...(lifecycle ? [{ kind: "let" as const, pattern: rn("lifecycle"), value: rc(rp("AotLifecycle", "new")) }] : []),
         ...(modelProtocol ? [re(rm(rp("model"), "bind_commands", rm(rf(rf(rp("lifecycle"), "models"), "commands"), "clone")))] : []),
         {
@@ -88,6 +90,11 @@ export function generateAotApp(root: AotComponent, propsType: RustType, demands?
           { name: "host" }, { name: "model" }, { name: "props" }, { name: "view" },
           ...(lifecycle ? [{ name: "lifecycle" }, { name: "mount_pending", value: { kind: "literal" as const, value: modelProtocol || !!root.hooks?.mount } }] : []),
           ...(modelProtocol ? [{ name: "commands", value: rc(rp("Vec", "new")) }] : []),
+          ...(specializedView ? [{ name: "force_view_update", value: { kind: "literal" as const, value: true } }] : []),
+          ...(specializationContract ? [{ name: "specialization", value: { kind: "struct" as const, path: ["microts", "pocketjs_core", "specialization", "SpecializationValidation"], fields: [
+            { name: "enabled", value: { kind: "literal" as const, value: false } },
+            { name: "diagnostics", value: rc(rp("Vec", "new")) },
+          ] } }] : []),
           ...slotNames.map(name => ({ name })),
           { name: "invalidation", value: rc(rp("microts", "Invalidation", "default")) },
           { name: "events", value: rc(rp("alloc", "vec", "Vec", "new")) },
@@ -100,12 +107,18 @@ export function generateAotApp(root: AotComponent, propsType: RustType, demands?
       returns: rr({ kind: "slice", element: event }),
       body: rb([
         re(rm(field("events"), "clear")),
+        ...(specializedView ? [
+          { kind: "let" as const, pattern: rn("__view_force", true), value: field("force_view_update") },
+          { kind: "assign" as const, target: field("force_view_update"), value: { kind: "literal" as const, value: false } },
+          re(rm(field("model"), "begin_view_frame")),
+        ] : []),
         { kind: "let", pattern: rn("input"), value: rm(rm(field("host"), "ui_mut"), "resolve_input", rp("input")) },
         ...(modelProtocol ? [
           { kind: "let" as const, pattern: rn("ready"), value: rm(field("host"), "model_ready") },
           re(rm(field("model"), "prepare_resume", ref(rp("ready")))), re(phase("Prepare")),
           re(rm(field("model"), "resume", ref(rp("ready")), ref(field("commands"), true))),
           { kind: "let" as const, pattern: rn("resumed"), value: phase("Resume") },
+          ...(specializedView ? [{ kind: "assign" as const, target: rp("__view_force"), value: { kind: "binary" as const, operator: "||", left: rp("__view_force"), right: { kind: "binary" as const, operator: "||", left: rp("resumed"), right: rm(field("model"), "view_requires_full_update") } } }] : []),
           re({ kind: "if", condition: { kind: "binary", operator: "||", left: rp("resumed"), right: rm(field("model"), "model_changed") }, then: rb([re(rm(field("invalidation"), "invalidate"))]) }),
         ] as ReturnType<typeof rb>["statements"] : []),
         {
@@ -114,7 +127,7 @@ export function generateAotApp(root: AotComponent, propsType: RustType, demands?
         },
         re({
           kind: "if", condition: rp("handled"),
-          then: rb([re(rm(field("invalidation"), "invalidate"))]),
+          then: rb([re(rm(field("invalidation"), "invalidate")), ...(specializedView && hasTopViewBindings ? [{ kind: "assign" as const, target: rp("__view_force"), value: { kind: "literal" as const, value: true } }] : [])]),
         }),
         re({
           kind: "if", condition: rm(field("invalidation"), "take"),
@@ -125,13 +138,14 @@ export function generateAotApp(root: AotComponent, propsType: RustType, demands?
     },
     {
       kind: "fn", name: "invalidate", public: true, params: [receiver()],
-      body: rb([re(rm(field("invalidation"), "invalidate"))]),
+      body: rb([re(rm(field("invalidation"), "invalidate")), ...(specializedView ? [{ kind: "assign" as const, target: field("force_view_update"), value: { kind: "literal" as const, value: true } }] : [])]),
     },
     {
       kind: "fn", name: "set_props", public: true, params: [receiver(), parameter("props", props)],
       body: rb([
         { kind: "assign", target: field("props"), value: rp("props") },
         re(rm(field("invalidation"), "invalidate")),
+        ...(specializedView ? [{ kind: "assign" as const, target: field("force_view_update"), value: { kind: "literal" as const, value: true } }] : []),
       ]),
     },
     {
@@ -191,6 +205,7 @@ export function generateAotApp(root: AotComponent, propsType: RustType, demands?
     unmount.body!.statements.push(re(rm(field("model"), "cancel_tasks", ref(field("commands"), true))), re(rm(rf(modelRegions, "commands"), "drain_to", ref(field("commands"), true))),
       { kind: "for", pattern: rn("command"), iterable: rc(rp("core", "mem", "take"), ref(field("commands"), true)), body: rb([re(rm(field("host"), "model_command", rp("command")))]) });
     methods.push({ kind: "fn", name: "initialize_model", params: [receiver()], body: rb([
+      ...(specializedView ? [{ kind: "let" as const, pattern: rn("__view_force", true), value: { kind: "literal" as const, value: true } }] : []),
       { kind: "let", pattern: rn("ready"), value: rm(field("host"), "model_initial_ready") },
       re(rm(field("model"), "prepare_resume", ref(rp("ready")))), re(phase("Prepare")),
       updateView(),
@@ -203,12 +218,51 @@ export function generateAotApp(root: AotComponent, propsType: RustType, demands?
     constructor.statements.push({ kind: "let", pattern: rn("app", true), value: constructor.result! }, re(rm(rp("app"), "initialize_model")));
     constructor.result = rp("app");
   }
+  if (specializationContract) {
+    const diagnostic = rt("microts::pocketjs_core::specialization::SpecializationDiagnostic");
+    const core = () => rm(rm(field("host"), "ui"), "core");
+    const uiMut = () => rm(field("host"), "ui_mut");
+    const enabled = rf(field("specialization"), "enabled");
+    const validate = () => rm(rp("SPECIALIZATION_CONTRACT"), "validate", core());
+    const disable = () => re(rm(uiMut(), "disable_specialization_regions"));
+    methods.push(
+      { kind: "fn", name: "initialize_specialization", params: [receiver()], body: rb([
+        { kind: "assign", target: field("specialization"), value: validate() },
+        re({ kind: "if", condition: { kind: "unary", operator: "!", expr: enabled }, then: rb([disable()]) }),
+        ...(bakedText ? [re({ kind: "if" as const, condition: enabled, then: rb([re(rm(uiMut(), "install_baked_text_sizes", rl(bakedText.target), rp("SPECIALIZATION_TEXT_SIZES"), rl(bakedText.budget, "usize")))]) })] : []),
+        ...(modelProtocol ? [re({ kind: "if" as const, condition: enabled, then: rb([re(rm(uiMut(), "activate_specialization_regions"))]) })] : []),
+      ]) },
+      { kind: "fn", name: "check_specialization", params: [receiver()], body: rb([
+        re({ kind: "if", condition: { kind: "binary", operator: "&&", left: enabled, right: { kind: "unary", operator: "!", expr: rm(rp("SPECIALIZATION_CONTRACT"), "matches", core()) } }, then: rb([
+          { kind: "assign", target: field("specialization"), value: validate() }, disable(),
+          re(rm(field("invalidation"), "invalidate")),
+          ...(specializedView ? [{ kind: "assign" as const, target: field("force_view_update"), value: { kind: "literal" as const, value: true } }] : []),
+        ]) }),
+      ]) },
+      { kind: "fn", name: "specialization_enabled", public: true, params: [parameter("self", rr(rt("Self")))], returns: rt("bool"), body: rb([], enabled) },
+      { kind: "fn", name: "specialization_diagnostics", public: true, params: [parameter("self", rr(rt("Self")))], returns: rr({ kind: "slice", element: diagnostic }), body: rb([], rm(rf(field("specialization"), "diagnostics"), "as_slice")) },
+    );
+    const constructor = methods.find(method => method.name === "new")!.body!;
+    if (!modelProtocol) constructor.statements.push({ kind: "let", pattern: rn("app", true), value: constructor.result! });
+    constructor.statements.push(re(rm(rp("app"), "initialize_specialization")));
+    constructor.result = rp("app");
+    const frame = methods.find(method => method.name === "frame")!.body!;
+    frame.statements.unshift(re(rm(self, "check_specialization")));
+    // Model commands can replace host assets during a frame, so recheck after
+    // lifecycle rounds and command delivery, before activating newly born roots.
+    frame.statements.splice(frame.statements.length - 1, 0,
+      re(rm(self, "check_specialization")),
+      re({ kind: "if", condition: enabled, then: rb([re(rm(uiMut(), "activate_specialization_regions"))]) }),
+    );
+  }
   return [
     {
       kind: "struct", name, public: true, generics,
       fields: [
         ...(lifecycle ? [{ name: "lifecycle", type: rt("AotLifecycle") }, { name: "mount_pending", type: rt("bool") }] : []),
         ...(modelProtocol ? [{ name: "commands", type: rt("Vec", rt("microts::Cmd")) }] : []),
+        ...(specializedView ? [{ name: "force_view_update", type: rt("bool") }] : []),
+        ...(specializationContract ? [{ name: "specialization", type: rt("microts::pocketjs_core::specialization::SpecializationValidation") }] : []),
         { name: "host", type: rt("H"), public: true },
         { name: "model", type: rt("M"), public: true },
         { name: "props", type: props },

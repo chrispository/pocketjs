@@ -18,6 +18,9 @@ portable-atomic = { version = "1.3", default-features = false, features = ["requ
 
 [features]
 default = []
+counters = ["pocketjs-core/counters"]
+# Logical node identities used by native differential validation only.
+harness = []
 std = ["pocketjs-core/std"]
 model-trace = ["std"]
 critical-section = ["portable-atomic/critical-section"]

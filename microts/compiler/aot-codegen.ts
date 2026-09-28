@@ -6,11 +6,17 @@ import { allocateRustTypeNames, printRust, rustVariant } from "./rust-printer";
 import { parseMicroTsColor, MICROTS_ELEMENTS } from "../../contracts/spec/microts";
 import { generateAotApp, generateAotLifecycle, generateAotReconcile } from "./aot-app-codegen";
 import { MOTION_VALUES, motionValueParameters, type MotionValueName } from "../../contracts/spec/motion";
+import { buildText, foldAotExpression, isBuildExpression } from "./aot-specialize-expr.ts";
+import { dependencyWords, mergeViewDependencies, viewExpressionDependencies, viewNodeDependencies } from "./aot-view-deps.ts";
+import { analyzeAotSpecialization } from "./aot-specialization.ts";
+import { staticDrawPlanAst, type AotStaticDrawPlan } from "./aot-static-draw-plan.ts";
+import { bakedSpecializationAst, type AotSpecializationBake } from "./aot-specialization-bake.ts";
+import { specializationContractAst, type AotSpecializationContract } from "./aot-specialization-contract.ts";
 
 const motionValueName = (id: number) => (Object.keys(MOTION_VALUES) as MotionValueName[]).find(name => MOTION_VALUES[name].id === id)!;
 
 type Locals = Map<string, AotType>;
-type ExpandedNode = AotNode;
+type ExpandedNode = AotNode & { logicalPath?: string; constantText?: string };
 interface Expansion {
   props: Map<string, AotExpr>;
   events: Map<string, { handler: AotHandler; expansion: Expansion }>;
@@ -56,12 +62,35 @@ class Lowerer {
   scopedLocals = new Set<string>();
   explicitSlotUpdates = new WeakSet<RustExpr>();
   asyncDispatch: boolean;
-  constructor(readonly program: AotProgram) {
+  readonly onceBlocks = new Set<string>();
+  readonly guardedBlocks = new Map<string, number[]>();
+  hasTopViewBindings = false;
+  readonly regionTemplates = new Set<string>();
+  readonly staticDrawPlans: ReturnType<typeof staticDrawPlanAst>;
+  readonly bakedLayouts: ReturnType<typeof bakedSpecializationAst>;
+  get environmentSpecialization(): boolean { return !!this.options.specialize && !!this.options.specializationContract; }
+  regionKey(node: Pick<AotNode, "id" | "loc">): string { return `${node.loc.file}:${node.loc.offset}:${node.id}`; }
+  get dependencyGuards(): boolean { return !!this.options.specialize && !!this.program.model; }
+  constructor(readonly program: AotProgram, readonly options: AotEmitOptions = {}) {
+    this.staticDrawPlans = staticDrawPlanAst(this.environmentSpecialization ? options.staticDrawPlans ?? [] : []);
+    this.bakedLayouts = bakedSpecializationAst(this.environmentSpecialization ? options.specializationBake : undefined);
     this.asyncDispatch = program.components.some(component => component.functions.some(fn => fn.async));
     this.lifecycle = !!program.modelProtocol || program.components.some(component => !!component.hooks?.mount || !!component.hooks?.unmount);
     this.declarations = new Map(program.types.map(t => [t.name, t]));
     this.components = new Map(program.components.map(c => [c.name, c]));
-    const usedConstants = new Set<string>();
+    if (this.environmentSpecialization) {
+      // A shared factory template can appear under several prop/parent contexts.
+      // Register its expanded copies only when every reachable context proves
+      // isolation; never promote one instance's facts onto the shared IR.
+      const proofs = new Map<string, boolean>();
+      for (const component of analyzeAotSpecialization(program).components) for (const node of component.nodes) {
+        if (node.kind !== "element") continue;
+        const key = this.regionKey(node);
+        proofs.set(key, (proofs.get(key) ?? true) && node.tag !== "Text" && !!node.region?.eligible);
+      }
+      for (const [key, eligible] of proofs) if (eligible) this.regionTemplates.add(key);
+    }
+    const usedConstants = new Set<string>(this.environmentSpecialization ? ["SPECIALIZATION_CONTRACT", "prepare_specialization", ...[...this.staticDrawPlans.items, ...this.bakedLayouts.items].flatMap(item => "name" in item ? [item.name] : [])] : []);
     for (const component of [...program.components].sort((a, b) => Number(b.root) - Number(a.root))) for (const constant of component.constants) {
       const base = usedConstants.has(constant.name) ? `${component.name}_${constant.name}` : constant.name;
       let name = base, suffix = 2; while (usedConstants.has(name)) name = `${base}_${suffix++}`;
@@ -81,6 +110,79 @@ class Lowerer {
     }
   }
   constantName(name: string, component = this.current): string { return this.constantNames.get(`${component.name}:${name}`) ?? name; }
+  foldContext() {
+    return { types: this.program.types, promoteF32Text: !!this.program.modelProtocol, resolveConstant: (expression: Extract<AotExpr, { kind: "constant" }>) => {
+      const resolved = this.constantExpressionName(expression);
+      for (const component of this.program.components) {
+        const constant = component.constants.find(value => this.constantName(value.name, component) === resolved);
+        if (constant) return constant;
+      }
+    } };
+  }
+  specialize(nodes: ExpandedNode[]): ExpandedNode[] {
+    const fold = (expression: AotExpr) => foldAotExpression(expression, this.foldContext());
+    return nodes.flatMap((node): ExpandedNode[] => {
+      if (node.kind === "if") {
+        const branches: Extract<AotNode, { kind: "if" }>["branches"] = [];
+        for (const branch of node.branches) {
+          const condition = branch.condition && fold(branch.condition);
+          if (condition?.kind === "literal" && condition.value === false) continue;
+          const always = !condition || condition.kind === "literal" && condition.value === true;
+          branches.push({ condition: always ? undefined : condition, children: this.specialize(branch.children) });
+          if (always) break;
+        }
+        // Keep Always arms inside their deferred block: mount creates siblings
+        // before the first update creates the selected branch.
+        return branches.length ? [{ ...node, branches }] : [];
+      }
+      if (node.kind === "element") {
+        // textParts already flattens expression-free templates into mount text.
+        // Preserve that classification before folding templates into literals.
+        const mountText = node.text && this.textParts(node.text.parts).every(part => typeof part === "string");
+        return [{ ...node, dynamicStyle: node.dynamicStyle && { ...node.dynamicStyle, expression: fold(node.dynamicStyle.expression) }, props: node.props.map(prop => ({ ...prop, value: fold(prop.value) })), text: node.text && { ...node.text, parts: mountText ? node.text.parts : node.text.parts.map(part => typeof part === "string" ? part : fold(part)) }, children: this.specialize(node.children) }];
+      }
+      if (node.kind === "for") return [{ ...node, source: fold(node.source), key: fold(node.key), children: this.specialize(node.children) }];
+      if (node.kind === "input") return [{ ...node, active: fold(node.active), children: this.specialize(node.children) }];
+      if (node.kind === "slot") return [{ ...node, props: node.props?.map(prop => ({ ...prop, value: fold(prop.value) })), fallback: this.specialize(node.fallback) }];
+      return [{ ...node, props: node.props.map(prop => ({ ...prop, value: fold(prop.value) })), slots: node.slots.map(slot => ({ ...slot, children: this.specialize(slot.children) })) }];
+    });
+  }
+  buildNode(node: ExpandedNode): boolean {
+    if (!this.options.specialize) return false;
+    if (node.kind === "if") return node.branches.length === 1 && !node.branches[0]!.condition && node.branches[0]!.children.every(child => this.buildNode(child));
+    if (node.kind !== "element") return false;
+    return (!node.dynamicStyle || isBuildExpression(node.dynamicStyle.expression)) && node.props.every(prop => isBuildExpression(prop.value))
+      && (!node.text || this.textParts(node.text.parts).every(part => typeof part === "string" || buildText(part, this.foldContext()) !== undefined)) && node.children.every(child => this.buildNode(child));
+  }
+  updateBlock(block: GeneratedBlock, target: RustExpr, args: RustExpr[]): RustStatement {
+    const update = re(rm(target, "update_at", ...args));
+    if (this.onceBlocks.has(block.name)) return re(ifExpr({ kind: "unary", operator: "!", expr: rf(target, "initialized") }, [update]));
+    const deps = this.guardedBlocks.get(block.name);
+    return deps ? re(ifExpr(this.viewNeedsUpdate(deps, { kind: "unary", operator: "!", expr: rf(target, "initialized") }), [update])) : update;
+  }
+  viewNeedsUpdate(deps: number[], first: RustExpr): RustExpr {
+    const words: RustExpr = { kind: "array", elements: dependencyWords(deps).map(word => rl(Number(word), "u64", String(word))) };
+    return binary("||", first, binary("||", rp("__view_force"), rm(vm, "view_changed", ref(words))));
+  }
+  guardedBinding(expression: AotExpr, first: RustExpr, statements: RustStatement[]): RustStatement[] {
+    const deps = this.dependencyGuards ? viewExpressionDependencies(this.program, this.current, expression) : null;
+    return deps === null ? statements : [re(ifExpr(this.viewNeedsUpdate(deps, first), statements))];
+  }
+  inspectTopBindings(nodes: ExpandedNode[]): void {
+    const expression = (value: AotExpr) => { if (viewExpressionDependencies(this.program, this.current, value) === null) this.hasTopViewBindings = true; };
+    for (const node of nodes) {
+      if (node.kind === "element") {
+        if (node.dynamicStyle) expression(node.dynamicStyle.expression);
+        node.props.forEach(prop => expression(prop.value));
+        node.text?.parts.forEach(part => { if (typeof part !== "string") expression(part); });
+        this.inspectTopBindings(node.children);
+      } else if (node.kind === "if") node.branches.forEach(branch => { if (branch.condition) expression(branch.condition); this.inspectTopBindings(branch.children); });
+      else if (node.kind === "for") { expression(node.source); expression(node.key); this.inspectTopBindings(node.children); }
+      else if (node.kind === "input") this.inspectTopBindings(node.children);
+      else if (node.kind === "component") { node.props.forEach(prop => expression(prop.value)); node.slots.forEach(slot => this.inspectTopBindings(slot.children)); }
+      else { node.props?.forEach(prop => expression(prop.value)); this.inspectTopBindings(node.fallback); }
+    }
+  }
   constantExpressionName(expression: Extract<AotExpr, { kind: "constant" }>): string { return this.resolvedConstants.get(expression) ?? this.constantName(expression.name); }
   variant(type: string, value: string) { return this.variantNames.get(type)?.get(value) ?? rustVariant(value); }
   typeName(name: string): string { return this.typeNames.get(name) ?? name; }
@@ -348,8 +450,11 @@ class Lowerer {
     this.inlineHandlers.set(result, { arguments: args, names, handler: rewritten });
     return result;
   }
-  expand(nodes: AotNode[], context: Expansion): ExpandedNode[] {
-    return nodes.flatMap(node => {
+  expand(nodes: AotNode[], context: Expansion, path = context.component.name): ExpandedNode[] {
+    return nodes.flatMap((source, index) => {
+      // Assign identity before specialization can prune branches or change the
+      // generated Rust serial numbers. This metadata never enters the public IR.
+      const node: ExpandedNode = { ...source, logicalPath: `${path}/node:${index}` };
       if (node.kind === "component") {
         const component = this.components.get(node.component)!;
         const childProps = new Map<string, AotExpr>();
@@ -359,23 +464,33 @@ class Lowerer {
           else if (p.default !== undefined) childProps.set(p.name, { kind: "literal", value: p.default, rawNumber: p.defaultRawNumber, type: p.type, loc: node.loc });
           else childProps.set(p.name, { kind: "undefined", type: p.type, loc: node.loc });
         }
-        if (component.factory) return [{ ...node, props: [...childProps].map(([name, value]) => ({ name, value })), events: node.events.flatMap(e => { const handler = this.rewriteHandler(e.handler, context); return handler ? [{ ...e, handler }] : []; }), slots: node.slots.map(s => ({ ...s, children: this.expand(s.children, context) })) }];
-        return this.expand(component.nodes, { component, props: childProps, events: new Map(node.events.map(e => [e.name, { handler: e.handler, expansion: context }])), slots: new Map(node.slots.map(s => [s.name, s])), slotExpansion: context });
+        if (component.factory) return [{ ...node, props: [...childProps].map(([name, value]) => ({ name, value })), events: node.events.flatMap(e => { const handler = this.rewriteHandler(e.handler, context); return handler ? [{ ...e, handler }] : []; }), slots: node.slots.map(s => ({ ...s, children: this.expand(s.children, context, `${node.logicalPath}/slot:${s.name}`) })) }];
+        return this.expand(component.nodes, { component, props: childProps, events: new Map(node.events.map(e => [e.name, { handler: e.handler, expansion: context }])), slots: new Map(node.slots.map(s => [s.name, s])), slotExpansion: context }, `${node.logicalPath}/component:${component.name}`);
       }
       if (node.kind === "slot") {
         const values = node.props?.map(prop => ({ ...prop, value: this.rewriteExpr(prop.value, context) }));
-        if (context.component === this.current) return [{ ...node, props: values, fallback: this.expand(node.fallback, context) }];
+        if (context.component === this.current) return [{ ...node, props: values, fallback: this.expand(node.fallback, context, `${node.logicalPath}/fallback`) }];
         const supplied = context.slots.get(node.name);
-        if (!supplied) return this.expand(node.fallback, context);
+        if (!supplied) return this.expand(node.fallback, context, `${node.logicalPath}/fallback`);
         const expansion = context.slotExpansion!, localValues = new Map(expansion.locals);
         for (const binding of supplied.bindings ?? []) { const value = values?.find(prop => prop.name === binding.prop)?.value; if (value) localValues.set(binding.name, value); }
-        return this.expand(supplied.children, { ...expansion, locals: localValues });
+        return this.expand(supplied.children, { ...expansion, locals: localValues }, `${node.logicalPath}/supplied:${node.name}`);
       }
-      if (node.kind === "if") return [{ ...node, branches: node.branches.map(b => ({ condition: b.condition ? this.rewriteExpr(b.condition, context) : undefined, children: this.expand(b.children, context) })) }];
-      if (node.kind === "for") return [{ ...node, source: this.rewriteExpr(node.source, context), key: this.rewriteExpr(node.key, context), children: this.expand(node.children, context) }];
-      if (node.kind === "input") return [{ ...node, active: this.rewriteExpr(node.active, context), handler: this.rewriteHandler(node.handler, context) ?? { kind: "emit", name: "__discard", arguments: [], id: node.handler.id, loc: node.handler.loc }, children: this.expand(node.children, context) }];
-      return [{ ...node, dynamicStyle: node.dynamicStyle ? { ...node.dynamicStyle, expression: this.rewriteExpr(node.dynamicStyle.expression, context) } : undefined, props: node.props.map(p => ({ ...p, value: this.rewriteExpr(p.value, context) })), text: node.text ? { ...node.text, parts: node.text.parts.map(p => typeof p === "string" ? p : this.rewriteExpr(p, context)) } : undefined, events: node.events.flatMap(e => { const handler = this.rewriteHandler(e.handler, context); return handler ? [{ ...e, handler }] : []; }), children: this.expand(node.children, context) }];
+      if (node.kind === "if") return [{ ...node, branches: node.branches.map((b, branch) => ({ condition: b.condition ? this.rewriteExpr(b.condition, context) : undefined, children: this.expand(b.children, context, `${node.logicalPath}/branch:${branch}`) })) }];
+      if (node.kind === "for") return [{ ...node, source: this.rewriteExpr(node.source, context), key: this.rewriteExpr(node.key, context), children: this.expand(node.children, context, node.logicalPath) }];
+      if (node.kind === "input") return [{ ...node, active: this.rewriteExpr(node.active, context), handler: this.rewriteHandler(node.handler, context) ?? { kind: "emit", name: "__discard", arguments: [], id: node.handler.id, loc: node.handler.loc }, children: this.expand(node.children, context, node.logicalPath) }];
+      return [{ ...node, dynamicStyle: node.dynamicStyle ? { ...node.dynamicStyle, expression: this.rewriteExpr(node.dynamicStyle.expression, context) } : undefined, props: node.props.map(p => ({ ...p, value: this.rewriteExpr(p.value, context) })), text: node.text ? { ...node.text, parts: node.text.parts.map(p => typeof p === "string" ? p : this.rewriteExpr(p, context)) } : undefined, events: node.events.flatMap(e => { const handler = this.rewriteHandler(e.handler, context); return handler ? [{ ...e, handler }] : []; }), children: this.expand(node.children, context, node.logicalPath) }];
     }) as ExpandedNode[];
+  }
+  logicalChild(segment: RustExpr, value: RustExpr): RustExpr {
+    return this.options.harness ? rm(ui, "with_logical_child", segment, { kind: "closure", params: [rn("ui")], body: value }) : value;
+  }
+  logicalUpdate(body: RustBlock): RustBlock {
+    if (!this.options.harness) return body;
+    return rb([
+      stmtLet("__logical_scope", rm(rf(self, "__logical_scope"), "clone")),
+      re(rm(ui, "with_logical_scope", ref(rp("__logical_scope")), { kind: "closure", params: [rn("ui")], body: { kind: "block", block: body } })),
+    ]);
   }
   contextParams(locals: Locals, dispatch = false): RustParam[] {
     return [param("props", rr(this.propsType())), param("vm", rr(rt("M"), dispatch)), ...this.injectionContext().map(value => param(this.injectionName(value.key), this.type(value.type, true))), ...this.slotParams(), ...[...locals].map(([name, type]) => param(this.localName(name), this.scopedLocals.has(name) && !this.copy(type) ? this.type(type, true) : rr(this.type(type))))];
@@ -399,6 +514,7 @@ class Lowerer {
     return blockExpr([stmtLet(name,rc(rp("Vec","new")),true),re({...call,args:[...call.args,ref(rp(name),true)]}),re(rm(commands,"extend",rp(name)))]);
   }
   method(name: string, params: RustParam[], body: RustBlock, returns?: RustType, generic = false, public_ = false): RustFunction {
+    if (name === "update_at") body.statements.unshift(re(rm(ui, "record_update_at")));
     if (name === "dispatch") {
       const memos = new Set(this.current.values.filter(value => value.memo).map(value => value.name));
       const companions = (value: unknown): unknown => {
@@ -449,6 +565,17 @@ class Lowerer {
       };
       body = thread(body) as RustBlock;
       if (traitMount) body.statements.unshift(stmtLet("lifecycle_owner", rm(rf(self, "lifecycle"), "clone")), stmtLet("lifecycle", ref(rp("lifecycle_owner"))));
+    }
+    if (this.dependencyGuards && ["update", "update_at"].includes(name)) {
+      params = [...params, param("__view_force", rt("bool"))];
+      const thread = (value: unknown): unknown => {
+        if (!value || typeof value !== "object") return value;
+        if (Array.isArray(value)) return value.map(thread);
+        const mapped = Object.fromEntries(Object.entries(value).map(([key, child]) => [key, thread(child)])) as Record<string, any>;
+        if (mapped.kind === "method" && ["update", "update_at"].includes(mapped.method) && !(mapped.object.kind === "path" && mapped.object.path[0] === "vm")) mapped.args.push(rp("__view_force"));
+        return mapped;
+      };
+      body = thread(body) as RustBlock;
     }
     return { kind: "fn", name, public: public_, params, returns, body, ...(generic ? { generics: [{ name: "M", bounds: [rt(`${this.current.name}ViewModel`)] }] } : {}) };
   }
@@ -574,9 +701,15 @@ class Lowerer {
     const children = nodes.map(node => this.compileNode(node, locals));
     this.registerBlock(name, children);
     const fields: RustField[] = [{ name: "parent", type: rt("NodeId") }, { name: "anchor", type: rt("NodeId") }, ...children.map((c, i) => ({ name: `child${i}`, type: rt(c.name) }))];
+    if (this.options.harness) fields.push({ name: "__logical_scope", type: rt("String") });
+    const once = !!this.options.specialize && nodes.every(node => this.buildNode(node));
+    const deps = this.dependencyGuards ? mergeViewDependencies(nodes.map(node => viewNodeDependencies(this.program, this.current, node))) : null;
+    if (deps !== null) this.guardedBlocks.set(name, deps);
+    if (once) this.onceBlocks.add(name);
+    if (once || deps !== null) fields.push({ name: "initialized", type: rt("bool") });
     this.items.push({ kind: "struct", name, public: !!requestedName, fields });
     const mount = children.map((c, i) => stmtLet(`child${i}`, rc(rp(c.name, "mount"), ui, parent, anchor, ...this.slotArgs())));
-    const init: RustExpr = { kind: "struct", path: ["Self"], fields: fields.map(f => ({ name: f.name })) };
+    const init: RustExpr = { kind: "struct", path: ["Self"], fields: fields.map(f => ({ name: f.name, ...(f.name === "initialized" ? { value: rl(false) } : f.name === "__logical_scope" ? { value: rm(rm(ui, "logical_scope"), "to_owned") } : {}) })) };
     const update: RustStatement[] = [];
     const dispatch: RustStatement[] = [stmtLet("handled", rl(false), true)];
     const childField = (i: number) => rf(self, `child${i}`);
@@ -591,14 +724,17 @@ class Lowerer {
     };
     this.structure(name, children.map((_, i) => rm(childField(i), "handler_count")).reduce((a, b) => binary("+", a, b), rl(0, "usize")), [assign(rf(self, "parent"), parent), assign(rf(self, "anchor"), anchor), ...children.flatMap((_, index) => { const i = children.length - 1 - index; return [stmtLet(`placement_anchor${i}`, following(i + 1, anchor)), re(rm(childField(i), "refresh_slot_placement", ui, parent, rp(`placement_anchor${i}`)))]; })], this.suffixPending(children.map((_, i) => childField(i))));
     children.forEach((c, i) => {
-      update[this.lifecycle ? "push" : "unshift"](stmtLet(`anchor${i}`, following(i + 1, anchor)), re(rm(childField(i), "update_at", ui, rf(self, "parent"), ...this.contextArgs(locals), rp(`anchor${i}`))));
+      update[this.lifecycle ? "push" : "unshift"](stmtLet(`anchor${i}`, following(i + 1, anchor)), this.updateBlock(c, childField(i), [ui, rf(self, "parent"), ...this.contextArgs(locals), rp(`anchor${i}`)]));
       dispatch.push(assign(rp("handled"), binary("|", rp("handled"), rm(childField(i), "dispatch", rp("input"), ...this.contextArgs(locals), rp("events")))));
     });
     if (this.lifecycle) update.push(re(rm(self, "refresh_slot_placement", ui, rf(self, "parent"), anchor)));
+    if (once) update.unshift(re(ifExpr(rf(self, "initialized"), [{ kind: "return" }])));
+    else if (deps !== null) update.unshift(re(ifExpr({ kind: "unary", operator: "!", expr: this.viewNeedsUpdate(deps, { kind: "unary", operator: "!", expr: rf(self, "initialized") }) }, [{ kind: "return" }])));
+    if (once || deps !== null) update.push(assign(rf(self, "initialized"), rl(true)));
     const methods = [
       this.method("mount", this.mountParams(), rb(mount, init), rt("Self"), false, !!requestedName),
       this.method("contains_node", [receiver(), param("target", rt("NodeId"))], rb([], children.map((_, i) => rm(childField(i), "contains_node", rp("target"))).reduce((a, b) => binary("||", a, b), rl(false))), rt("bool")),
-      this.method("update_at", [receiver(true), param("ui", rr(rt("Ui"), true)), param("parent", rt("NodeId")), ...this.contextParams(locals), param("anchor", rt("NodeId"))], rb([assign(rf(self, "parent"), parent), assign(rf(self, "anchor"), anchor), ...update]), undefined, true),
+      this.method("update_at", [receiver(true), param("ui", rr(rt("Ui"), true)), param("parent", rt("NodeId")), ...this.contextParams(locals), param("anchor", rt("NodeId"))], this.logicalUpdate(rb([assign(rf(self, "parent"), parent), assign(rf(self, "anchor"), anchor), ...update])), undefined, true),
       this.method("dispatch", [receiver(true), param("input", rr(rt("Input"))), ...this.contextParams(locals, true), param("events", rr(this.eventSinkType(), true))], rb(dispatch, rp("handled")), rt("bool"), true, !!requestedName),
     ];
     if (requestedName) methods.push(
@@ -622,12 +758,29 @@ class Lowerer {
     const fields: RustField[] = [{ name: "node", type: rt("NodeId") }, { name: "children", type: rt(children.name) }];
     const initial: { name: string; value?: RustExpr }[] = [{ name: "node" }, { name: "children" }];
     const mount: RustStatement[] = [stmtLet("node", rm(ui, "create_node", rl(MICROTS_ELEMENTS[node.tag].nodeType, "u8"))), re(rm(ui, "insert_before", parent, rp("node"), anchor)), re(rm(ui, "set_style", rp("node"), rc(rp("StyleId"), rl(node.style, "i32"))))];
+    if (this.options.harness) mount.splice(1, 0, re(rm(ui, "register_logical_template", rp("node"), rl(node.logicalPath!))));
+    const staticPlan = this.staticDrawPlans.names.get(node.logicalPath!);
+    if (staticPlan) {
+      const target = this.options.staticDrawPlans!.find(plan => plan.sourceKey === node.logicalPath)!.target;
+      mount.push(re(ifExpr(rc(rp("microts", "specialization", "baking_target_matches"), rl(target)), [re(rm(ui, "queue_static_draw_plan", rp("node"), ref(rp(staticPlan))))])));
+    }
     if (node.focusable) mount.push(re(rm(ui, "set_focusable", rp("node"), rl(true))));
     if (node.src) mount.push(re(rm(ui, "set_image_asset", rp("node"), rl(node.src))));
     if (node.debugName) mount.push(re(rm(ui, "set_debug_name", rp("node"), rl(node.debugName))));
+    if (this.environmentSpecialization && this.regionTemplates.has(this.regionKey(node))) mount.push(re(rm(ui, "queue_layout_region", rp("node"))));
+    const bakedLayout = this.bakedLayouts.names.get(node.logicalPath!);
+    if (bakedLayout) mount.push(re(rm(ui, "queue_baked_region_layout", rp("node"), ref(rp(bakedLayout)))));
     mount.push(stmtLet("children", rc(rp(children.name, "mount"), ui, rp("node"), noNode, ...this.slotArgs())));
     const update: RustStatement[] = [];
     const nodeId = rf(self, "node");
+    const once = this.buildNode(node);
+    const deps = this.dependencyGuards ? viewNodeDependencies(this.program, this.current, node) : null;
+    if (deps !== null) this.guardedBlocks.set(name, deps);
+    let firstUpdate = false;
+    const firstWrite = (statements: RustStatement[]) => {
+      firstUpdate = true;
+      update.push(re(ifExpr({ kind: "unary", operator: "!", expr: rf(self, "initialized") }, statements)));
+    };
     if (node.ref) {
       fields.push({ name: "node_ref", type: rt("Option", rt("microts::NodeSlot")) });
       initial.push({ name: "node_ref", value: none });
@@ -638,10 +791,14 @@ class Lowerer {
     this.inputTraversal(name, binary("||", node.events.length ? rm(rp("input"), "is_press", nodeId) : rl(false), rm(rf(self, "children"), "pending", rp("input"))), [re(rm(rf(self, "children"), "sample_idle", rp("input")))]);
     this.structure(name, binary("+", rl(node.events.length, "usize"), rm(rf(self, "children"), "handler_count")), [re(rm(rf(self, "children"), "refresh_slot_placement", ui, nodeId, noNode))], rb([...(node.events.length ? [re(ifExpr(binary("&&", binary("<", rp("skip"), rl(node.events.length, "usize")), rm(rp("input"), "is_press", nodeId)), [{ kind: "return", value: rl(true) }]))] : [])], rm(rf(self, "children"), "pending_after", rp("input"), rm(rp("skip"), "saturating_sub", rl(node.events.length, "usize")))));
     const memo = (key: string, expression: AotExpr, apply: (value: RustExpr) => RustExpr) => {
+      if (this.options.specialize && isBuildExpression(expression)) {
+        firstWrite([re(rm(ui, "record_memo_write")), re(apply(this.expr(expression, locals)))]);
+        return;
+      }
       this.requireDerive(expression.type, "PartialEq");
       fields.push({ name: key, type: rt("Option", this.type(expression.type)) }); initial.push({ name: key, value: none });
       const value = rp(`value_${key}`); const field = rf(self, key);
-      update.push(stmtLet(`value_${key}`, this.expr(expression, locals)), re(ifExpr(binary("!=", field, some(value)), [re(apply(value)), assign(field, some(value))])));
+      update.push(...this.guardedBinding(expression, rm(field, "is_none"), [re(rm(ui, "record_memo_evaluation")), stmtLet(`value_${key}`, this.expr(expression, locals)), re(ifExpr(binary("!=", field, some(value)), [re(rm(ui, "record_memo_write")), re(apply(value)), assign(field, some(value))]))]));
     };
     if (node.dynamicStyle) memo("style_memo", node.dynamicStyle.expression, value => rm(ui, "set_style", nodeId, node.dynamicStyle!.expression.type.kind === "style" ? value : rc(rp("StyleId"), cast(value, rt("i32")))));
     node.props.forEach((p, i) => memo(`prop_memo${i}`, p.value, value => rm(ui, "set_prop", nodeId, rl(p.prop, "u8"), cast(this.unwrapNumeric(value, p.value.type), rt("f64")))));
@@ -649,20 +806,35 @@ class Lowerer {
       const parts = this.textParts(node.text.parts);
       const expressions = parts.filter((p): p is AotExpr => typeof p !== "string");
       expressions.forEach(e => this.requireDerive(e.type, "PartialEq"));
+      const builtText = this.options.specialize ? parts.map(part => typeof part === "string" ? part : buildText(part, this.foldContext(), !!(part as AotExpr & { templateDisplay?: boolean }).templateDisplay)) : undefined;
       if (!expressions.length) mount.push(re(rm(ui, "set_text", rp("node"), rl(parts.join("")))));
+      else if (builtText && builtText.every(part => part !== undefined)) {
+        // The ordinary text memo starts empty, so an empty first result has no
+        // core write. Nonempty Build text stays at the first-update boundary.
+        if (builtText.join("") !== "") firstWrite([re(rm(ui, "record_memo_write")), re(rm(ui, "set_text", nodeId, rl(builtText.join(""))))]);
+      }
       else {
+        const textUpdateStart = update.length;
         fields.push({ name: "text_inputs", type: rt("Option", { kind: "tuple", elements: expressions.map(e => this.type(e.type)) }) }, { name: "text_value", type: rt("String") }, { name: "text_scratch", type: rt("String") });
         initial.push({ name: "text_inputs", value: none }, { name: "text_value", value: rc(rp("String", "new")) }, { name: "text_scratch", value: rc(rp("String", "new")) });
+        update.push(re(rm(ui, "record_memo_evaluation")));
         expressions.forEach((e, i) => update.push(stmtLet(`text_input${i}`, this.expr(e, locals))));
         const changed = expressions.map((e, i) => binary("!=", this.borrowedValue(rf(rp("previous"), i), e.type), this.ownsExpression(e) ? this.borrowedValue(rp(`text_input${i}`), e.type) : rp(`text_input${i}`))).reduce((a, b) => binary("||", a, b));
         const check = rm(rm(rf(self, "text_inputs"), "as_ref"), "map_or", rl(true), { kind: "closure", params: [rn("previous")], body: changed });
         const format = parts.map(p => typeof p === "string" ? p.replaceAll("{", "{{").replaceAll("}", "}}") : "{}").join("");
         const scratch = rf(self, "text_scratch"), output = rf(self, "text_value");
-        const body = [re(rm(scratch, "clear")), re(rm({ kind: "macro", name: ["write"], args: [ref(scratch, true), rl(format), ...expressions.map((e, i) => this.displayExpr(e, rp(`text_input${i}`)))] }, "expect", rl("writing to String cannot fail"))), re(ifExpr(binary("!=", scratch, output), [re(rc(rp("core", "mem", "swap"), ref(scratch, true), ref(output, true))), re(rm(ui, "set_text", nodeId, ref(output)))])), assign(rf(self, "text_inputs"), some({ kind: "tuple", elements: expressions.map((e, i) => this.ownsExpression(e) ? rp(`text_input${i}`) : this.own(rp(`text_input${i}`), e.type)) }))];
+        const body = [re(rm(scratch, "clear")), re(rm({ kind: "macro", name: ["write"], args: [ref(scratch, true), rl(format), ...expressions.map((e, i) => this.displayExpr(e, rp(`text_input${i}`)))] }, "expect", rl("writing to String cannot fail"))), re(ifExpr(binary("!=", scratch, output), [re(rm(ui, "record_memo_write")), re(rc(rp("core", "mem", "swap"), ref(scratch, true), ref(output, true))), re(rm(ui, "set_text", nodeId, ref(output)))])), assign(rf(self, "text_inputs"), some({ kind: "tuple", elements: expressions.map((e, i) => this.ownsExpression(e) ? rp(`text_input${i}`) : this.own(rp(`text_input${i}`), e.type)) }))];
         update.push(re(ifExpr(check, body)));
+        const expression: AotExpr = { kind: "template", parts, type: { kind: "string" }, loc: node.loc };
+        update.push(...this.guardedBinding(expression, rm(rf(self, "text_inputs"), "is_none"), update.splice(textUpdateStart)));
       }
     }
-    update.push(re(rm(rf(self, "children"), "update_at", ui, nodeId, ...this.contextArgs(locals), noNode)));
+    update.push(this.updateBlock(children, rf(self, "children"), [ui, nodeId, ...this.contextArgs(locals), noNode]));
+    if (once || firstUpdate || deps !== null) {
+      fields.push({ name: "initialized", type: rt("bool") }); initial.push({ name: "initialized", value: rl(false) });
+      if (once) { this.onceBlocks.add(name); update.unshift(re(ifExpr(rf(self, "initialized"), [{ kind: "return" }]))); }
+      update.push(assign(rf(self, "initialized"), rl(true)));
+    }
     const dispatch: RustStatement[] = [stmtLet("handled", rl(false), true)];
     for (const event of node.events) dispatch.push(re(ifExpr(binary("&&", rm(rp("cursor"), "visit"), rm(rp("input"), "is_press", nodeId)), [...this.handler(event.handler, locals), assign(rp("handled"), rl(true))])));
     this.items.push({ kind: "struct", name, fields });
@@ -833,7 +1005,7 @@ class Lowerer {
           re(rm(rf(rp("lifecycle"), "models"), "register", rp("sequence"), rc(rp("alloc", "boxed", "Box", "new"), {
             kind: "closure", params: [rn("phase"), rn("ready"), rn("cmds")], move: true,
             body: blockExpr([stmtLet("model", rm(rp("phase_model"), "borrow_mut"), true), re({ kind: "match", value: rp("phase"), arms: [
-              { pattern: { kind: "variant", path: ["microts", "ModelPhase", "Prepare"] }, body: rm(rp("model"), "prepare_resume", rp("ready")) },
+              { pattern: { kind: "variant", path: ["microts", "ModelPhase", "Prepare"] }, body: this.dependencyGuards ? blockExpr([re(rm(rp("model"), "begin_view_frame")), re(rm(rp("model"), "prepare_resume", rp("ready")))]) : rm(rp("model"), "prepare_resume", rp("ready")) },
               { pattern: { kind: "variant", path: ["microts", "ModelPhase", "Resume"] }, body: rm(rp("model"), "resume", rp("ready"), rp("cmds")) },
               { pattern: { kind: "variant", path: ["microts", "ModelPhase", "React"] }, body: rm(rp("model"), "react", rl(false), rp("cmds")) },
               { pattern: { kind: "variant", path: ["microts", "ModelPhase", "Settle"] }, body: rm(rp("model"), "settle") },
@@ -857,7 +1029,7 @@ class Lowerer {
     }
     const initialize = parameterized ? mount.splice(initializeStart) : [];
     if (parameterized) { mount.push(stmtLet("model", none)); if (sharedModel) mount.push(stmtLet("sequence", rl(0, "usize"))); }
-    mount.push(stmtLet("view", rc({ kind: "qualifiedPath", type: viewType, member: "mount" }, ui, parent, anchor, ...mountedSlots)));
+    mount.push(stmtLet("view", this.logicalChild(rl(node.logicalPath!), rc({ kind: "qualifiedPath", type: viewType, member: "mount" }, ui, parent, anchor, ...mountedSlots))));
     if (sharedModel) mount.push(stmtLet("lifecycle", rm(rp("lifecycle"), "clone")));
     const modelStorage = (mutable = false): RustExpr => parameterized ? rm(rm(rf(self, "model"), mutable && !sharedModel ? "as_mut" : "as_ref"), "expect", rl("factory initialized before dispatch")) : rf(self, "model");
     const modelRef = (mutable = false): RustExpr => ref(sharedModel ? { kind: "unary", operator: "*", expr: rm(modelStorage(), mutable ? "borrow_mut" : "borrow") } : parameterized ? { kind: "unary", operator: "*", expr: modelStorage(mutable) } : rf(self, "model"), mutable);
@@ -958,7 +1130,7 @@ class Lowerer {
     const nativeUpdate = blockExpr([re(ifExpr(binary("||", binary("!=", derefSlot("slot_parent"), parent), binary("!=", derefSlot("slot_anchor"), anchor)), [assign(derefSlot("slot_parent"), parent), assign(derefSlot("slot_anchor"), anchor), re(rm(rp("slot"), "move_before", ui, parent, anchor))])), ...updateArguments]);
     const nativeDispatch = contract ? rm(rp("events"), "slot_event", rc(rp(`${this.current.name}SlotEvent`, this.slotVariant(node.name)), { kind: "unary", operator: "*", expr: rp("input") }, rm(rp("slot"), "instance_id"), ...arguments_.map(value => this.expr(value, locals, true))), rp("cursor")) : rm(rp("events"), "slot", rp("input"), rm(rp("slot"), "instance_id"), rp("cursor"));
     this.items.push({ kind: "impl", type: rt(name), methods: [
-      this.method("mount", this.mountParams(), rb([], mount), rt("Self")),
+      this.method("mount", this.mountParams(), rb([], this.logicalChild(rl(node.logicalPath!), mount)), rt("Self")),
       this.method("contains_node", [receiver(), param("target", rt("NodeId"))], rb([], slotMatch(rl(false), rm(rp("block"), "contains_node", rp("target")))), rt("bool")),
       this.method("update_at", [receiver(true), param("ui", rr(rt("Ui"), true)), param("parent", rt("NodeId")), ...this.contextParams(locals), param("anchor", rt("NodeId"))], rb([re(slotMatch(nativeUpdate, rm(rp("block"), "update_at", ui, parent, ...this.contextArgs(locals), anchor)))]), undefined, true),
       this.method("dispatch", [receiver(true), param("input", rr(rt("Input"))), ...this.contextParams(locals, true), param("events", rr(this.eventSinkType(), true))], rb([], slotMatch(nativeDispatch, rm(rp("block"), "dispatch", rp("input"), ...this.contextArgs(locals), rp("events")))), rt("bool"), true),
@@ -981,16 +1153,18 @@ class Lowerer {
     selected = this.branchSelection(node.branches, locals) ?? selected;
     const current: RustExpr = { kind: "match", value: ref({ kind: "unary", operator: "*", expr: self }), arms: [...branches.map((_, i) => ({ pattern: { kind: "variant", path: ["Self", `B${i}`], tuple: [emptyPattern] } as RustPattern, body: rl(i, "i32") })), { pattern: empty, body: rl(-1, "i32") }] };
     const mountSelected: RustExpr = { kind: "match", value: rp("selected"), arms: [...branches.map((b, i) => ({ pattern: { kind: "literal", value: i } as RustPattern, body: rc(rp("Self", `B${i}`), rc(rp(b.name, "mount"), ui, parent, anchor, ...this.slotArgs())) })), { pattern: emptyPattern, body: rp("Self", "Empty") }] };
+    const always = !!this.options.specialize && node.branches.length === 1 && !node.branches[0]!.condition;
+    const update = always ? [re(ifExpr({ kind: "matches", value: self, pattern: empty }, [assign({ kind: "unary", operator: "*", expr: self }, rc(rp("Self", "B0"), rc(rp(branches[0]!.name, "mount"), ui, parent, anchor, ...this.slotArgs())))])), re(matchBlock(self, "update_at", [ui, parent, ...this.contextArgs(locals), anchor], { kind: "tuple", elements: [] }))] : [
+      stmtLet("selected", selected), stmtLet("current", current),
+      re(ifExpr(binary("!=", rp("selected"), rp("current")), [
+        stmtLet("old", rc(rp("core", "mem", "replace"), self, rp("Self", "Empty"))), re(rm(rp("old"), "unmount", ui)),
+        assign({ kind: "unary", operator: "*", expr: self }, mountSelected),
+      ])), re(matchBlock(self, "update_at", [ui, parent, ...this.contextArgs(locals), anchor], { kind: "tuple", elements: [] })),
+    ];
     this.items.push({ kind: "impl", type: rt(name), methods: [
       this.method("mount", this.mountParams(), rb([], rp("Self", "Empty")), rt("Self")),
       this.method("contains_node", [receiver(), param("target", rt("NodeId"))], rb([], matchBlock(self, "contains_node", [rp("target")], rl(false))), rt("bool")),
-      this.method("update_at", [receiver(true), param("ui", rr(rt("Ui"), true)), param("parent", rt("NodeId")), ...this.contextParams(locals), param("anchor", rt("NodeId"))], rb([
-        stmtLet("selected", selected), stmtLet("current", current),
-        re(ifExpr(binary("!=", rp("selected"), rp("current")), [
-          stmtLet("old", rc(rp("core", "mem", "replace"), self, rp("Self", "Empty"))), re(rm(rp("old"), "unmount", ui)),
-          assign({ kind: "unary", operator: "*", expr: self }, mountSelected),
-        ])), re(matchBlock(self, "update_at", [ui, parent, ...this.contextArgs(locals), anchor], { kind: "tuple", elements: [] })),
-      ]), undefined, true),
+      this.method("update_at", [receiver(true), param("ui", rr(rt("Ui"), true)), param("parent", rt("NodeId")), ...this.contextParams(locals), param("anchor", rt("NodeId"))], rb(update), undefined, true),
       this.method("dispatch", [receiver(true), param("input", rr(rt("Input"))), ...this.contextParams(locals, true), param("events", rr(this.eventSinkType(), true))], rb([], matchBlock(self, "dispatch", [rp("input"), ...this.contextArgs(locals), rp("events")], rl(false))), rt("bool"), true),
     ] });
     this.blockImpl(name, matchBlock(self, "first_node", [], noNode), [re(matchBlock(self, "move_before", [ui, parent, anchor], { kind: "tuple", elements: [] }))], [re(matchBlock(self, "unmount", [ui], { kind: "tuple", elements: [] }))]);
@@ -1013,10 +1187,21 @@ class Lowerer {
     const pendingAfter = rb([stmtLet("first_row", findFirst(rp("skip"))), stmtLet("remaining", rm(rp("skip"), "saturating_sub", prefixBefore(rp("first_row")))), { kind: "for", pattern: { kind: "tuple", elements: [rn("index"), rn("row")] }, iterable: rm(rm(rm(rowsField, "iter"), "enumerate"), "skip", rp("first_row")), body: rb([re(ifExpr(rm(rowField, "pending_after", rp("input"), { kind: "if", condition: binary("==", rp("index"), rp("first_row")), then: rb([], rp("remaining")), otherwise: rb([], rl(0, "usize")) }), [{ kind: "return", value: rl(true) }]))]) }], rl(false));
     this.structure(name, rm(rm(rm(ends, "last"), "copied"), "unwrap_or", rl(0, "usize")), [assign(rf(self, "parent"), parent), stmtLet("next", anchor, true), { kind: "for", pattern: rn("row"), iterable: rm(rm(rowsField, "iter_mut"), "rev"), body: rb([re(rm(rowField, "refresh_slot_placement", ui, parent, rp("next"))), stmtLet("first", rm(rowField, "first_node")), re(ifExpr(binary("!=", rp("first"), noNode), [assign(rp("next"), rp("first"))]))]) }, ...refreshCounts], pendingAfter);
     const keyBody: RustStatement[] = node.index ? [stmtLet(this.localName(node.index), ref(rp("row_index")))] : [];
-    const keyClosure: RustExpr = { kind: "closure", params: [rn(this.localName(node.item)), rn("row_index")], body: blockExpr(keyBody, this.expr(node.key, rowLocals, true)) };
+    const keyValue = this.expr(node.key, rowLocals, true);
+    // The reconciler computes a key immediately before mounting its row. Share
+    // that value with the harness instead of evaluating the key expression twice.
+    const keyClosure: RustExpr = { kind: "closure", params: [rn(this.localName(node.item)), rn("row_index")], body: this.options.harness ? blockExpr([
+      ...keyBody, stmtLet("__logical_key", keyValue),
+      assign({ kind: "unary", operator: "*", expr: rm(rp("__logical_row_key"), "borrow_mut") }, { kind: "macro", name: ["alloc", "format"], args: [rl(`${node.logicalPath}/key:{}`), this.displayExpr(node.key, rp("__logical_key"))] }),
+    ], rp("__logical_key")) : blockExpr(keyBody, keyValue) };
     const sameKey: RustExpr = { kind: "closure", params: [rn("old_key"), rn(this.localName(node.item)), rn("row_index")], body: blockExpr(keyBody, this.keyEqual(this.copy(node.key.type) ? { kind: "unary", operator: "*", expr: rp("old_key") } : rm(rp("old_key"), "as_str"), node.key, rowLocals)) };
+    const mountRow = rc(rp(row.name, "mount"), ui, parent, anchor, ...this.slotArgs());
+    const mountedRow = this.options.harness ? blockExpr([stmtLet("__logical_key", rm(rm(rp("__logical_row_key"), "borrow"), "clone"))], this.logicalChild(ref(rp("__logical_key")), mountRow)) : mountRow;
     const updateBody: RustStatement[] = node.index ? [stmtLet(this.localName(node.index), ref(rp("row_index")))] : [];
-    updateBody.push(re(rm(rp("block"), "update_at", ui, parent, ...this.contextArgs(rowLocals), rp("row_anchor"))));
+    // Arrays have no per-element versions. Every retained dynamic row evaluates
+    // its bindings when reconciliation runs; only Build rows skip that work.
+    if (this.dependencyGuards && !this.onceBlocks.has(row.name)) updateBody.push(stmtLet("__view_force", rl(true)));
+    updateBody.push(this.updateBlock(row, rp("block"), [ui, parent, ...this.contextArgs(rowLocals), rp("row_anchor")]));
     const dispatch: RustStatement[] = [stmtLet("handled", rl(false), true), stmtLet("first_row", findFirst(rm(rp("cursor"), "completed_offset"))), re(rm(rp("cursor"), "skip_completed", prefixBefore(rp("first_row")))), { kind: "for", pattern: { kind: "tuple", elements: [rn("row_index"), rn("row")] }, iterable: rm(rm(rm(rowsField, "iter_mut"), "enumerate"), "skip", rp("first_row")), body: rb([
       re(ifExpr(rm(rowField, "pending_after", rp("input"), rm(rp("cursor"), "completed_offset")), [
         stmtLet("row_context", none, true, rt("Option", { kind: "tuple", elements: [rt("i32"), this.type(node.itemType)] })),
@@ -1039,8 +1224,9 @@ class Lowerer {
       this.method("mount", this.mountParams(), rb([], { kind: "struct", path: ["Self"], fields: [{ name: "rows", value: rc(rp("KeyedList", "new")) }, { name: "parent" }, { name: "handler_ends", value: rc(rp("Vec", "new")) }] }), rt("Self")),
       this.method("contains_node", [receiver(), param("target", rt("NodeId"))], rb([], rm(rm(rf(rf(self, "rows"), "rows"), "iter"), "any", { kind: "closure", params: [rn("row")], body: rm(rf(rp("row"), "block"), "contains_node", rp("target")) })), rt("bool")),
       this.method("update_at", [receiver(true), param("ui", rr(rt("Ui"), true)), param("parent", rt("NodeId")), ...this.contextParams(locals), param("anchor", rt("NodeId"))], rb([
+        ...(this.options.harness ? [stmtLet("__logical_row_key", rc(rp("core", "cell", "RefCell", "new"), rc(rp("String", "new"))))] : []),
         re((this.lifecycle ? (...args: RustExpr[]) => rc(rp("aot_reconcile"), ref(rf(self, "rows"), true), ...args) : (...args: RustExpr[]) => rm(rf(self, "rows"), "reconcile", ...args))(ui, parent, anchor, ref(this.expr(node.source, locals)), ...(this.lifecycle ? [] : [sameKey]), keyClosure,
-          { kind: "closure", params: [rn("ui"), rn("parent"), rn("anchor"), rn(this.localName(node.item)), rn("row_index")], body: rc(rp(row.name, "mount"), ui, parent, anchor, ...this.slotArgs()) },
+          { kind: "closure", params: [rn("ui"), rn("parent"), rn("anchor"), rn(this.localName(node.item)), rn("row_index")], body: mountedRow },
           { kind: "closure", params: [rn("block"), rn("ui"), rn(this.localName(node.item)), rn("row_index"), rn("row_anchor")], body: blockExpr(updateBody) },
         )), ...(this.lifecycle ? [re(rm(self, "refresh_slot_placement", ui, parent, anchor))] : refreshCounts),
       ]), undefined, true),
@@ -1113,6 +1299,11 @@ class Lowerer {
         this.method("bind_commands", [receiver(true), param("_queue", rt("microts::CommandQueue"))], rb()),
         this.method("model_changed", [receiver()], rb([], rl(false)), rt("bool")),
       );
+      if (this.dependencyGuards) traitMethods.push(
+        this.method("begin_view_frame", [receiver(true)], rb()),
+        this.method("view_requires_full_update", [receiver()], rb([], rl(true)), rt("bool")),
+        this.method("view_changed", [receiver(), param("_mask", rr({ kind: "slice", element: rt("u64") }))], rb([], rl(true)), rt("bool")),
+      );
       const associatedTypes = this.statefulChildren(component).map(name => ({ name, bounds: [rt(`${name}ViewModel`), this.factoryBound(name)] }));
       this.items.push({ kind: "trait", name: `${component.name}ViewModel`, public: true, associatedTypes, methods: traitMethods });
       if (!component.root && !component.factory && !associatedTypes.length) this.items.push({ kind: "impl", type: unit, trait: rt(`${component.name}ViewModel`), methods: [] });
@@ -1127,17 +1318,46 @@ class Lowerer {
         });
       }
       const expanded = this.expand(component.nodes, { component, props: new Map(), events: new Map(), slots: new Map() });
-      this.compileGroup(expanded, new Map(), `${component.name}View`);
-      if (component.root) this.items.push(...generateAotApp(component, this.propsType(component), this.program.demands, this.blocks.get(`${component.name}View`)!.generic, this.lifecycle, this.program.version, !!this.program.modelProtocol, this.asyncDispatch));
+      const specialized = this.options.specialize ? this.specialize(expanded) : expanded;
+      if (this.dependencyGuards) this.inspectTopBindings(specialized);
+      this.compileGroup(specialized, new Map(), `${component.name}View`);
+      if (component.root) this.items.push(...generateAotApp(component, this.propsType(component), this.program.demands, this.blocks.get(`${component.name}View`)!.generic, this.lifecycle, this.program.version, !!this.program.modelProtocol, this.asyncDispatch, this.dependencyGuards, this.hasTopViewBindings, this.environmentSpecialization, this.environmentSpecialization && this.options.specializationBake?.textSizes.length ? { target: this.options.specializationBake.target!, budget: this.options.specializationShapeCacheBytes ?? 32768 } : undefined));
     }
+    if (this.environmentSpecialization) this.items.push(
+      ...this.staticDrawPlans.items,
+      ...this.bakedLayouts.items,
+      specializationContractAst(this.options.specializationContract!),
+      { kind: "fn", name: "prepare_specialization", public: true, params: [param("ui", rr(rt("microts::Ui"), true))], body: rb([re(rm(ui, "prepare_specialization"))]) },
+    );
     return { items: this.finishGenerics(), attributes: [{ name: "allow", args: ["unused_variables", "unused_imports", "unused_mut", "dead_code", "non_snake_case", "non_camel_case_types", "non_upper_case_globals", "type_alias_bounds"] }] };
   }
 }
 
 export interface AotEmission { files: Record<string, string>; ast: RustModule }
-export function lowerAot(program: AotProgram): RustModule { checkAotVersion(program); if (program.model && !program.modelProtocol) attachAotModel(program, program.model); return new Lowerer(program).run(); }
-export function emitAot(program: AotProgram): AotEmission {
-  const ast = lowerAot(program);
+/** Native-private expanded templates. Build passes must never write these facts onto shared IR. */
+export interface AotSpecializationTemplate { component: string; nodes: ExpandedNode[] }
+export function aotSpecializationTemplates(program: AotProgram): AotSpecializationTemplate[] {
+  checkAotVersion(program);
+  const lowerer = new Lowerer(program, { specialize: true });
+  return program.components.map(component => {
+    lowerer.current = component;
+    const annotate = (nodes: ExpandedNode[]): ExpandedNode[] => nodes.map(node => {
+      if (node.kind === "element") {
+        const text = node.text && lowerer.textParts(node.text.parts).map(part => typeof part === "string" ? part : buildText(part, lowerer.foldContext(), !!(part as AotExpr & { templateDisplay?: boolean }).templateDisplay));
+        return { ...node, ...(text && text.every(part => part !== undefined) ? { constantText: text.join("") } : {}), children: annotate(node.children) };
+      }
+      if (node.kind === "if") return { ...node, branches: node.branches.map(branch => ({ ...branch, children: annotate(branch.children) })) };
+      if (node.kind === "component") return { ...node, slots: node.slots.map(slot => ({ ...slot, children: annotate(slot.children) })) };
+      if (node.kind === "slot") return { ...node, fallback: annotate(node.fallback) };
+      return { ...node, children: annotate(node.children) };
+    });
+    return { component: component.name, nodes: annotate(lowerer.specialize(lowerer.expand(component.nodes, { component, props: new Map(), events: new Map(), slots: new Map() }))) };
+  });
+}
+export interface AotEmitOptions { specialize?: boolean; harness?: boolean; specializationContract?: AotSpecializationContract; staticDrawPlans?: readonly AotStaticDrawPlan[]; specializationBake?: AotSpecializationBake; specializationShapeCacheBytes?: number }
+export function lowerAot(program: AotProgram, options: AotEmitOptions = {}): RustModule { checkAotVersion(program); if (program.model && !program.modelProtocol) attachAotModel(program, program.model); return new Lowerer(program, options).run(); }
+export function emitAot(program: AotProgram, options: AotEmitOptions = {}): AotEmission {
+  const ast = lowerAot(program, options);
   const moduleName = program.root.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
   return { ast, files: { [`${moduleName}.rs`]: printRust(ast), "mod.rs": printRust({ items: [{ kind: "mod", name: moduleName }, { kind: "use", path: ["self", moduleName], names: ["*"], public: true }] }) } };
 }

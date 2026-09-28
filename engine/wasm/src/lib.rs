@@ -198,6 +198,50 @@ pub extern "C" fn ui_node_text_color(id: i32) -> u32 {
     ui().resolved_style(id).map_or(0, |style| style.text_color)
 }
 
+// Native compiler baking channels; these are absent from the guest wasm build.
+#[cfg(any(feature = "specialization-host", feature = "specialization-inspect"))]
+#[no_mangle]
+pub extern "C" fn ui_specialization_layout(id: i32, component: u32) -> f32 {
+    ui().layout_of(id).map_or(f32::NAN, |(x, y, w, h)| match component {
+        0 => x, 1 => y, 2 => w, 3 => h, _ => f32::NAN,
+    })
+}
+
+#[cfg(any(feature = "specialization-host", feature = "specialization-inspect"))]
+#[no_mangle]
+pub extern "C" fn ui_specialization_region(id: i32) -> bool {
+    ui().set_layout_region(id, true)
+}
+
+#[cfg(any(feature = "specialization-host", feature = "specialization-inspect"))]
+#[no_mangle]
+pub extern "C" fn ui_specialization_guard(id: i32, component: u32) -> f32 {
+    ui().layout_region_guard(id).map_or(f32::NAN, |guard| match component {
+        0 => guard.unrounded_origin.0, 1 => guard.unrounded_origin.1,
+        2 => guard.unrounded_size.0, 3 => guard.unrounded_size.1, _ => f32::NAN,
+    })
+}
+
+#[cfg(any(feature = "specialization-host", feature = "specialization-inspect"))]
+#[no_mangle]
+pub extern "C" fn ui_specialization_shape(ptr: *const u8, len: usize, slot: u32, tracking: f32, line_height: f32, component: u32) -> f32 {
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+    let Ok(text) = core::str::from_utf8(bytes) else { return f32::NAN; };
+    let (width, height) = ui().shaped_text_size(text, slot as u8, tracking, line_height);
+    match component { 0 => width, 1 => height, _ => f32::NAN }
+}
+
+#[cfg(any(feature = "specialization-host", feature = "specialization-inspect"))]
+#[no_mangle]
+pub extern "C" fn ui_specialization_words_ptr() -> *const u32 { ui().draw().words.as_ptr() }
+#[cfg(any(feature = "specialization-host", feature = "specialization-inspect"))]
+#[no_mangle]
+pub extern "C" fn ui_specialization_words_len() -> usize { ui().draw().words.len() }
+
+#[cfg(any(feature = "specialization-host", feature = "specialization-inspect"))]
+#[no_mangle]
+pub extern "C" fn ui_specialization_glyph_misses() -> u32 { ui().glyph_misses() }
+
 #[no_mangle]
 pub extern "C" fn ui_destroy_node(id: i32) {
     ui().destroy_node(id)

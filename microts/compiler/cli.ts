@@ -10,7 +10,7 @@ const isSfc = candidate?.endsWith(".vue") || (candidate &&
     existsSync(path) && statSync(path).isDirectory(),
   ));
 if (args[0] === "--help" || args[0] === "-h") {
-  console.log("bun microts/compiler/cli.ts build <app|Root.vue|App.tsx> [--out gen] [--strict] [--ir file] [--board name] [--no-format]\nbun microts/compiler/cli.ts check <app|Root.vue|App.tsx> [--strict] [--boards | --board name] [--json]\nbun microts/compiler/cli.ts run <app> --tape <file>");
+  console.log("bun microts/compiler/cli.ts build <app|Root.vue|App.tsx> [--out gen] [--strict] [--ir file] [--board name] [--specialize on|off] [--no-format]\nbun microts/compiler/cli.ts check <app|Root.vue|App.tsx> [--strict] [--boards | --board name] [--report specialization] [--json]\nbun microts/compiler/cli.ts run <app> --tape <file>");
 } else if (args[0] === "build" || args[0] === "run" || args[0] === "check" && candidate?.endsWith(".tsx") || isSfc) {
   try {
     const { runAotCli } = await import("./aot-build.ts");

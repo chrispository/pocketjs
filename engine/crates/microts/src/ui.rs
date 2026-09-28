@@ -103,6 +103,21 @@ impl Input {
     }
 }
 
+/// Calls made by a generated view. Totals accumulate until reset.
+#[cfg(feature = "counters")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UiCounters {
+    pub set_style: u64,
+    pub set_prop: u64,
+    pub set_text: u64,
+    pub nodes_created: u64,
+    /// Includes descendants removed by a subtree destruction.
+    pub nodes_destroyed: u64,
+    pub update_at: u64,
+    pub memo_evaluations: u64,
+    pub memo_writes: u64,
+}
+
 /// Typed direct calls into `pocketjs_core::Ui`; no op stream or mirror tree.
 pub struct Ui {
     core: CoreUi,
@@ -117,6 +132,19 @@ pub struct Ui {
     model_services: Vec<String>,
     model_animations: BTreeMap<i32, crate::RequestId>,
     model_logs: Vec<String>,
+    /// Allocated only by generated native specialization setup. Candidates wait
+    /// for the first update to write all initial dimensions before registration.
+    specialization_pending: Option<Vec<NodeId>>,
+    specialization_layout_pending: Option<Vec<(NodeId, &'static crate::specialization::BakedRegionLayout)>>,
+    specialization_draw_pending: Option<Vec<(NodeId, &'static pocketjs_core::draw::StaticDrawPlan)>>,
+    #[cfg(feature = "counters")]
+    counters: UiCounters,
+    /// Harness-only history includes retired generations so queued commands
+    /// can be normalized after their target subtree has been destroyed.
+    #[cfg(feature = "harness")]
+    logical_nodes: BTreeMap<NodeId, String>,
+    #[cfg(feature = "harness")]
+    logical_scope: String,
 }
 
 impl Default for Ui {
@@ -143,6 +171,15 @@ impl Ui {
             model_services: Vec::new(),
             model_animations: BTreeMap::new(),
             model_logs: Vec::new(),
+            specialization_pending: None,
+            specialization_layout_pending: None,
+            specialization_draw_pending: None,
+            #[cfg(feature = "counters")]
+            counters: UiCounters::default(),
+            #[cfg(feature = "harness")]
+            logical_nodes: BTreeMap::new(),
+            #[cfg(feature = "harness")]
+            logical_scope: String::new(),
         }
     }
     pub fn core(&self) -> &CoreUi {
@@ -154,8 +191,180 @@ impl Ui {
     pub fn into_core(self) -> CoreUi {
         self.core
     }
+    #[cfg(feature = "counters")]
+    pub fn counters(&self) -> UiCounters {
+        self.counters
+    }
+
+    /// Reset generated-view and core work totals, preserving live-state gauges.
+    #[cfg(feature = "counters")]
+    pub fn reset_counters(&mut self) {
+        self.counters = UiCounters::default();
+        self.core.reset_counters();
+    }
+
+    /// Generated code records each entered update_at method.
+    #[inline(always)]
+    pub fn record_update_at(&mut self) {
+        #[cfg(feature = "counters")]
+        { self.counters.update_at = self.counters.update_at.saturating_add(1); }
+    }
+
+    #[inline(always)]
+    pub fn record_memo_evaluation(&mut self) {
+        #[cfg(feature = "counters")]
+        { self.counters.memo_evaluations = self.counters.memo_evaluations.saturating_add(1); }
+    }
+
+    #[inline(always)]
+    pub fn record_memo_write(&mut self) {
+        #[cfg(feature = "counters")]
+        { self.counters.memo_writes = self.counters.memo_writes.saturating_add(1); }
+    }
+
+    #[cfg(feature = "harness")]
+    pub fn logical_scope(&self) -> &str {
+        &self.logical_scope
+    }
+
+    /// Re-enter a group's mount context when a later update mounts a branch.
+    #[cfg(feature = "harness")]
+    pub fn with_logical_scope<T>(&mut self, scope: &str, run: impl FnOnce(&mut Self) -> T) -> T {
+        let previous = core::mem::replace(&mut self.logical_scope, scope.into());
+        let result = run(self);
+        self.logical_scope = previous;
+        result
+    }
+
+    /// Length-prefix segments so row keys containing path delimiters stay distinct.
+    #[cfg(feature = "harness")]
+    pub fn with_logical_child<T>(&mut self, segment: &str, run: impl FnOnce(&mut Self) -> T) -> T {
+        let scope = alloc::format!("{}{length}:{segment}", self.logical_scope, length = segment.len());
+        self.with_logical_scope(&scope, run)
+    }
+
+    #[cfg(feature = "harness")]
+    pub fn register_logical_template(&mut self, node: NodeId, template: &str) {
+        let identity = alloc::format!("{}{length}:{template}", self.logical_scope, length = template.len());
+        self.register_logical_node(node, identity);
+    }
+
+    /// Identity is supplied by generated component paths, row keys, and node indices.
+    #[cfg(feature = "harness")]
+    pub fn register_logical_node(&mut self, node: NodeId, identity: String) {
+        if self.core.node_exists(node.0) {
+            self.logical_nodes.insert(node, identity);
+        }
+    }
+
+    #[cfg(feature = "harness")]
+    pub fn logical_node(&self, node: NodeId) -> Option<&str> {
+        if node == NodeId::NONE { return Some("$none"); }
+        if node == NodeId::ROOT { return Some("$root"); }
+        self.logical_nodes.get(&node).map(String::as_str)
+    }
+
+    pub fn set_layout_region(&mut self, node: NodeId, enabled: bool) -> bool {
+        self.core.set_layout_region(node.0, enabled)
+    }
+
+    /// The host calls generated `prepare_specialization` before loading assets.
+    pub fn prepare_specialization(&mut self) {
+        self.core.enable_font_identity();
+        if self.specialization_pending.is_none() {
+            self.specialization_pending = Some(Vec::new());
+            self.specialization_layout_pending = Some(Vec::new());
+            self.specialization_draw_pending = Some(Vec::new());
+        }
+    }
+
+    /// A compiler-proven candidate, including nodes first mounted in later frames.
+    pub fn queue_layout_region(&mut self, node: NodeId) {
+        if let Some(pending) = &mut self.specialization_pending {
+            pending.push(node);
+        }
+    }
+
+    pub fn queue_baked_region_layout(&mut self, node: NodeId, plan: &'static crate::specialization::BakedRegionLayout) {
+        if crate::specialization::baking_target_matches(plan.target) {
+            if let Some(pending) = &mut self.specialization_layout_pending {
+                pending.push((node, plan));
+            }
+        }
+    }
+
+    /// Prefill only after the generated environment contract has passed.
+    pub fn install_baked_text_sizes(&mut self, target: &str, sizes: &[crate::specialization::BakedTextSize], budget: usize) {
+        if !crate::specialization::baking_target_matches(target) || sizes.is_empty() { return; }
+        self.core.set_shaped_size_cache_budget(budget);
+        for size in sizes {
+            let revision = self.core.font_atlas_revision(size.slot);
+            self.core.cache_shaped_size(size.slot, revision, size.text, size.tracking, size.line_height, size.size);
+        }
+    }
+
+    /// Build-time core words remain pending until initial property writes and
+    /// layout-region registration have completed.
+    pub fn queue_static_draw_plan(&mut self, node: NodeId, plan: &'static pocketjs_core::draw::StaticDrawPlan) {
+        if let Some(pending) = &mut self.specialization_draw_pending {
+            pending.push((node, plan));
+        }
+    }
+
+    /// Called after initial values and lifecycle effects, before layout is solved.
+    pub fn activate_specialization_regions(&mut self) {
+        if let Some(pending) = &mut self.specialization_pending {
+            for node in pending.drain(..) {
+                if self.core.node_exists(node.0) {
+                    self.core.set_layout_region(node.0, true);
+                }
+            }
+        }
+        if let Some(pending) = &mut self.specialization_layout_pending {
+            for (root, plan) in pending.drain(..) {
+                if !self.core.node_exists(root.0) { continue; }
+                let mut ids = Vec::new();
+                let mut stack = alloc::vec![(root.0, -1i32)];
+                let mut complete = true;
+                while let Some((node, parent)) = stack.pop() {
+                    let index = ids.len();
+                    let Some(expected) = plan.nodes.get(index) else { complete = false; break; };
+                    if expected.parent != parent { complete = false; break; }
+                    ids.push((node, expected.rect));
+                    for child in self.core.node_children(node).iter().rev() {
+                        stack.push((*child, index as i32));
+                    }
+                }
+                if complete && ids.len() == plan.nodes.len() {
+                    self.core.set_region_layout(root.0, plan.guard, &ids);
+                }
+            }
+        }
+        if let Some(pending) = &mut self.specialization_draw_pending {
+            for (node, plan) in pending.drain(..) {
+                if self.core.node_exists(node.0) {
+                    self.core.set_region_draw_plan(node.0, plan);
+                }
+            }
+        }
+    }
+
+    /// Deoptimization is permanent for this mounted generated app.
+    pub fn disable_specialization_regions(&mut self) {
+        self.specialization_pending = None;
+        self.specialization_layout_pending = None;
+        self.specialization_draw_pending = None;
+        self.core.disable_layout_regions();
+        self.core.set_shaped_size_cache_budget(0);
+    }
+
     pub fn create_node(&mut self, kind: u8) -> NodeId {
-        NodeId(self.core.create_node(kind))
+        let node = NodeId(self.core.create_node(kind));
+        #[cfg(feature = "counters")]
+        if self.core.node_exists(node.0) {
+            self.counters.nodes_created = self.counters.nodes_created.saturating_add(1);
+        }
+        node
     }
     pub fn insert_before(&mut self, parent: NodeId, child: NodeId, anchor: NodeId) {
         self.core.insert_before(parent.0, child.0, anchor.0);
@@ -170,6 +379,14 @@ impl Ui {
         if node == NodeId::ROOT || node.0 == self.core.auxiliary_surface_root() {
             return;
         }
+        #[cfg(feature = "counters")]
+        if self.core.node_exists(node.0) {
+            let mut current = node;
+            while current != NodeId::NONE && self.is_within(current, node) {
+                self.counters.nodes_destroyed = self.counters.nodes_destroyed.saturating_add(1);
+                current = self.next_node(current);
+            }
+        }
         self.repair_focus(node);
         self.core.destroy_node(node.0);
         self.focusable.retain(|id| self.core.node_exists(id.0));
@@ -179,12 +396,18 @@ impl Ui {
         }
     }
     pub fn set_style(&mut self, node: NodeId, style: StyleId) {
+        #[cfg(feature = "counters")]
+        { self.counters.set_style = self.counters.set_style.saturating_add(1); }
         self.core.set_style(node.0, style.0);
     }
     pub fn set_prop(&mut self, node: NodeId, prop: u8, value: f64) {
+        #[cfg(feature = "counters")]
+        { self.counters.set_prop = self.counters.set_prop.saturating_add(1); }
         self.core.set_prop(node.0, prop, value);
     }
     pub fn set_text(&mut self, node: NodeId, text: &str) {
+        #[cfg(feature = "counters")]
+        { self.counters.set_text = self.counters.set_text.saturating_add(1); }
         self.core.set_text(node.0, text);
     }
     pub fn set_focus(&mut self, node: NodeId) {

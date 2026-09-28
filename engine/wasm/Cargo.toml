@@ -18,6 +18,13 @@ crate-type = ["cdylib"]
 [dependencies]
 pocketjs-core = { path = "../core" }
 
+[features]
+# Compiler-only host baking artifact. The ordinary guest wasm leaves this off;
+# taffy's std and no_std rounding implementations differ near half boundaries.
+specialization-host = ["pocketjs-core/std"]
+# Readback/solver tooling with the ordinary guest no_std math configuration.
+specialization-inspect = []
+
 [profile.release]
 opt-level = "s"
 lto = true

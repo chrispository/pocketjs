@@ -7,6 +7,7 @@ import { printRust, rustVariant } from "./rust-printer.ts";
 import { exactIntegerLiteral, typeName } from "./aot-types.ts";
 import { ANIMATABLE, PROP, type PropName } from "../../contracts/spec/spec.ts";
 import { parseMicroTsColor } from "../../contracts/spec/microts.ts";
+import { modelViewSources } from "./aot-view-deps.ts";
 
 const self = rp("self"), unit: RustType = { kind: "tuple", elements: [] };
 const field = (name: string) => rf(self, name);
@@ -36,7 +37,7 @@ class ModelRust {
   modules = new Map<number, ModelModule>();
   functions = new Map<number, ModelFunction>();
   declarations: Map<string, AotTypeDeclaration>;
-  constructor(readonly program: ModelProgram, readonly view?: AotProgram) {
+  constructor(readonly program: ModelProgram, readonly view?: AotProgram, readonly options: ModelRustOptions = {}) {
     this.declarations = new Map(program.types.map(t => [t.name, t]));
     for (const module of program.modules) for (const func of module.functions) { this.modules.set(func.id, module); this.functions.set(func.id, func); }
   }
@@ -422,6 +423,25 @@ class ModelRust {
     const fields: RustField[] = [{ name: "depth", type: rt("Depth") }, { name: "commands", type: rt("microts::CommandQueue") }, { name: "instance", type: rt("u32") }, { name: "frame", type: rt("u64") }, { name: "now_ms", type: rt("f64") }, { name: "resumed", type: rt("bool") }, { name: "trace_mode", type: rr(rt("str"), false, "static") }];
     const seeds: { name: string; value: RustExpr }[] = [ { name: "depth", value: rc(rp("Depth", "new"), rl(this.program.recursionLimit, "u32")) }, { name: "commands", value: rc(rp("microts", "CommandQueue", "default")) }, { name: "instance", value: rc(rp("microts", "model", "next_region")) }, { name: "frame", value: rl(0) }, { name: "now_ms", value: rl(0, "f64") }, { name: "resumed", value: rl(false) }, { name: "trace_mode", value: rl("construction") } ];
     const methods: RustFunction[] = [], traitMethods: RustFunction[] = [], watchSeeds: RustStatement[] = [];
+    const viewSources = modelViewSources(module), wordCount = Math.ceil(viewSources.length / 64);
+    const specialize = !!this.options.specialize && !!this.view;
+    const zeroWords = (): RustExpr => ({ kind: "array", elements: Array.from({ length: wordCount }, () => rl(0, "u64")) });
+    // React and settle clear their working flags. Keep the view snapshot until
+    // begin_view_frame so later lifecycle rounds still see earlier writes.
+    const captureViewChanges = (): RustStatement[] => specialize ? [
+      ...viewSources.map((id, bit) => {
+        const word: RustExpr = { kind: "index", object: field("view_changed_words"), index: rl(Math.floor(bit / 64), "usize") };
+        return condition(field(`changed_${id}`), [assign(word, bin("|", word, rl(2 ** (bit % 64), "u64", String(1n << BigInt(bit % 64)))))]);
+      }),
+      assign(field("view_resumed"), bin("||", field("view_resumed"), field("resumed"))),
+    ] : [];
+    if (specialize) {
+      fields.push({ name: "view_changed_words", type: { kind: "array", element: rt("u64"), length: wordCount } }, { name: "view_resumed", type: rt("bool") });
+      seeds.push({ name: "view_changed_words", value: zeroWords() }, { name: "view_resumed", value: rl(false) });
+      traitMethods.push(fn("begin_view_frame", [receiver(true)], rb([assign(field("view_changed_words"), zeroWords()), assign(field("view_resumed"), rl(false))])));
+      traitMethods.push(fn("view_requires_full_update", [receiver()], rb([], bin("||", field("view_resumed"), field("resumed"))), rt("bool")));
+      traitMethods.push(fn("view_changed", [receiver(), param("mask", rr({ kind: "slice", element: rt("u64") }))], rb([], bin("||", rm(self, "view_requires_full_update"), rm(rm(rm(field("view_changed_words"), "iter"), "zip", rp("mask")), "any", { kind: "closure", params: [{ kind: "tuple", elements: [rn("changed"), rn("dependency")] }], body: bin("!=", bin("&", { kind: "unary", operator: "*", expr: rp("changed") }, { kind: "unary", operator: "*", expr: rp("dependency") }), rl(0, "u64")) }))), rt("bool")));
+    }
     methods.push(fn("model_state", [receiver()], rb([], { kind: "if", condition: rc(rp("microts", "model", "trace_enabled")), then: rb([], rc(rp("Value", "Object"), { kind: "macro", name: ["alloc", "vec"], args: [...module.signals, ...module.memos, ...module.fields].map(item => ({ kind: "tuple", elements: [rc(rp("String", "from"), rl(item.name)), rm(this.storage(item.id), "model_value")] })) })), otherwise: rb([], rp("Value", "Unit")) }), rt("Value"), true));
     for (const p of module.params) { fields.push({ name: this.name(p.id), type: this.type(p.type, false, p.capacity) }); seeds.push({ name: this.name(p.id), value: this.own(rp(this.name(p.id)), p.type) }); }
     this.constructing = true;
@@ -510,9 +530,9 @@ class ModelRust {
     }
     traitMethods.push(fn("react", [receiver(true), param("initial", rt("bool")), param("cmds", rr(rt("Vec", rt("Cmd")), true))], rb([
       ...module.schedule.map(id => { const effect = module.effects.find(e => e.id === id); return effect ? condition(or([...(effect.defer ? [] : [rp("initial")]), bin("&&", { kind: "unary", operator: "!", expr: rp("initial") }, or(effect.subscriptions.map(s => field(`changed_${s}`))))]), [work("Effect"), this.trace("effect", id, "", rp("Value", "Unit"), { initial: rp("initial") }), assign(field("trace_mode"), rl("demand")), re(rm(self, `effect_${id}`))]) : re(block([work("ScheduledMemo"), assign(field("trace_mode"), rl("scheduled")), re(rm(self, `read_${id}`)), assign(field("trace_mode"), rl("demand"))])); }),
-      ...reset(), assign(field("resumed"), rl(false)), re(rm(field("commands"), "drain_to", rp("cmds"))),
+      ...captureViewChanges(), ...reset(), assign(field("resumed"), rl(false)), re(rm(field("commands"), "drain_to", rp("cmds"))),
     ])));
-    traitMethods.push(fn("settle", [receiver(true)], rb([assign(field("trace_mode"), rl("settle")), ...memoOrder.map(id => re(rm(self, `read_${id}`))), ...reset(), assign(field("trace_mode"), rl("demand"))])));
+    traitMethods.push(fn("settle", [receiver(true)], rb([assign(field("trace_mode"), rl("settle")), ...memoOrder.map(id => re(rm(self, `read_${id}`))), ...captureViewChanges(), ...reset(), assign(field("trace_mode"), rl("demand"))])));
     traitMethods.push(fn("bind_commands", [receiver(true), param("commands", rt("microts::CommandQueue"))], rb([assign(field("commands"), rp("commands"))])));
     traitMethods.push(fn("model_changed", [receiver()], rb([], or([field("resumed"), ...module.signals.map(s => field(`changed_${s.id}`)), { kind: "unary", operator: "!", expr: rm(field("commands"), "is_empty") }])), rt("bool")));
     if (!module.tasks.length) {
@@ -703,7 +723,8 @@ class ModelRust {
   }
 }
 
-export function generateModelRust(program: ModelProgram, view?: AotProgram): string {
+export interface ModelRustOptions { specialize?: boolean }
+export function generateModelRust(program: ModelProgram, view?: AotProgram, options: ModelRustOptions = {}): string {
   checkModelVersion(program);
-  return new ModelRust(program, view).generate();
+  return new ModelRust(program, view, options).generate();
 }

@@ -33,6 +33,7 @@ pub mod model;
 pub mod model_regions;
 pub mod motion;
 pub mod spec;
+pub mod specialization;
 mod ui;
 
 pub use alloc::{string::String, vec::Vec};
@@ -52,6 +53,8 @@ pub use motion::{
 };
 pub use pocketjs_core;
 pub use ui::{Input, NodeId, StyleId, Ui};
+#[cfg(feature = "counters")]
+pub use ui::UiCounters;
 
 /// One pending update, regardless of how many handlers or host mutations occurred.
 #[derive(Clone, Copy, Debug)]

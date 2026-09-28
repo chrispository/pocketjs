@@ -27,7 +27,7 @@ export type RustItem =
   | { kind: "enum"; name: string; public?: boolean; derives?: string[]; generics?: RustGeneric[]; variants: { name: string; fields?: RustField[]; tuple?: RustType[] }[] }
   | { kind: "trait"; name: string; public?: boolean; generics?: RustGeneric[]; bounds?: RustType[]; associatedTypes?: { name: string; bounds: RustType[] }[]; methods: RustFunction[] }
   | { kind: "impl"; type: RustType; trait?: RustType; generics?: RustGeneric[]; associatedTypes?: { name: string; type: RustType }[]; methods: RustFunction[] }
-  | { kind: "const"; name: string; public?: boolean; type: RustType; value: RustExpr }
+  | { kind: "const"; name: string; public?: boolean; storage?: "static"; type: RustType; value: RustExpr }
   | { kind: "typeAlias"; name: string; public?: boolean; generics?: RustGeneric[]; type: RustType }
   | RustFunction;
 export interface RustBlock { statements: RustStatement[]; result?: RustExpr }
