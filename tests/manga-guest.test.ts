@@ -42,9 +42,13 @@ test.each([false, true])("compiled terminal retains selection and caches with Re
     const replies: string[] = [], requests: string[] = [];
     const heldImages: { id: number; entry: number }[] = [];
     let holdPreview = false, holdDetail = false;
-    const imageReply = (id: number, entry: number) => replies.push(JSON.stringify({ id, image: {
-      token: token++, width: entry === 1 ? 128 : 256, height: entry === 1 ? 128 : 256,
-    } }));
+    let failDetail = false;
+    const imageReply = (id: number, entry: number) => {
+      if (entry === 4 && failDetail) { replies.push(JSON.stringify({ id, error: "SD read failed" })); return; }
+      replies.push(JSON.stringify({ id, image: {
+        token: token++, width: entry === 1 ? 128 : 256, height: entry === 1 ? 128 : 256,
+      } }));
+    };
     const releaseImages = () => {
       for (let i = 0; i < heldImages.length;) {
         const image = heldImages[i]!;
@@ -123,7 +127,10 @@ test.each([false, true])("compiled terminal retains selection and caches with Re
       holdPreview = false; releaseImages(); await frames();
       expect(visible()).toContain("READABLE | SHARPENING");
       expect(requests).toContain("manga-b/4");
-      holdDetail = false; releaseImages(); await frames();
+      failDetail = true; holdDetail = false; releaseImages(); await frames();
+      expect(visible()).toContain("READABLE | DETAIL UNAVAILABLE | START RETRY");
+      failDetail = false;
+      await press(BTN.START);
       expect(visible()).toContain("PAGE READY");
     }
     await press(BTN.RTRIGGER); await press(BTN.SELECT);
