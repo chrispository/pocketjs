@@ -6,11 +6,11 @@ import { parseProgress } from "../progress.ts";
 import type { OffloadImage } from "../../../contracts/spec/offload.ts";
 import { deflateSync } from "node:zlib";
 import { documentHead } from "../document.ts";
-import { parseSeries, pickLevel, tilesPerPage, windowTiles, type SeriesMeta } from "../model.ts";
+import { levelTiles, pageTile, pageTileBase, pageTiles, parseSeries, pickLevel, tilesPerPage, windowTiles, type SeriesMeta } from "../model.ts";
 
 export interface MangaResource { revision: string; payload?: string; image?: OffloadImage;
   compressed?: { pixels: Uint8Array; width: number; height: number }; notModified?: boolean }
-export function mangaMethods(root: string, budget = { maxEntries: 512, maxBytes: 32 * 1024 * 1024 }) {
+export function mangaMethods(root: string, budget = { maxEntries: 1536, maxBytes: 128 * 1024 * 1024 }) {
   const store = new MangaStore(root);
   const cache = boundedCache<string, { signature: string; resource: MangaResource }>(budget.maxEntries, budget.maxBytes);
   let reads = 0, conversions = 0;
@@ -47,24 +47,55 @@ export function mangaMethods(root: string, budget = { maxEntries: 512, maxBytes:
     }
     if (warmQueue.length) warmTimer = setTimeout(warmNext, 15);
   }
-  function warmPages(pack: string, firstPage: number) {
+  function warmPages(pack: string, firstPage: number, focusEntry?: number) {
     const meta = metaFor(pack);
     if (!meta) return;
     const fitHeight = 240 * meta.pageW / 400;
-    const queue = (page: number, level: number) => {
-      const tiles = windowTiles(meta, page, level, 0, 0, meta.pageW, fitHeight, 0);
-      for (const tile of tiles.slice(0, 6)) {
-        const payload = `${tile.pack}/${tile.entry}`;
-        const cached = cache.get(`manga.image:${payload}`);
-        if (cached?.signature === metas.get(pack)?.signature || warmKeys.has(payload)) continue;
-        if (warmQueue.length < 32) { warmKeys.add(payload); warmQueue.push(payload); }
-      }
+    const desired: string[] = [], seen = new Set<string>();
+    const add = (tile: { pack: string; entry: number }) => {
+      const payload = `${tile.pack}/${tile.entry}`;
+      if (seen.has(payload)) return;
+      seen.add(payload);
+      const cached = cache.get(`manga.image:${payload}`);
+      if (cached?.signature !== metas.get(pack)?.signature) desired.push(payload);
+    };
+    const queue = (page: number, level: number, full = false) => {
+      const visible = windowTiles(meta, page, level, 0, 0, meta.pageW, fitHeight, 0);
+      const tiles = full ? [...visible, ...pageTiles(meta, page, level)] : visible;
+      for (const tile of tiles) add(tile);
     };
     const detail = pickLevel(meta, 400 / meta.pageW);
+    if (focusEntry !== undefined) {
+      let offset = focusEntry - pageTileBase(meta, firstPage);
+      for (let level = 0; level < meta.levels.length; level++) {
+        const lv = meta.levels[level]!, count = levelTiles(lv);
+        if (offset < count) {
+          if (level > 0 && count > 1) {
+            const x = offset % lv.cols, y = Math.floor(offset / lv.cols);
+            for (let radius = 0; radius <= 1; radius++)
+              for (let dy = -radius; dy <= radius; dy++)
+                for (let dx = -radius; dx <= radius; dx++)
+                  if (Math.max(Math.abs(dx), Math.abs(dy)) === radius && x + dx >= 0 && x + dx < lv.cols && y + dy >= 0 && y + dy < lv.rows)
+                    add(pageTile(meta, firstPage, level, x + dx, y + dy));
+          }
+          break;
+        }
+        offset -= count;
+      }
+    }
+    // Finish the first screen before scanning the full page. A page turn
+    // promotes its working set ahead of stale background preparations.
     queue(firstPage, 0);
     if (detail > 0) queue(firstPage, detail);
-    for (let page = firstPage + 1; page < Math.min(meta.pages, firstPage + 4); page++) queue(page, 0);
-    if (detail > 0 && firstPage + 1 < meta.pages) queue(firstPage + 1, detail);
+    if (firstPage + 1 < meta.pages) queue(firstPage + 1, 0);
+    for (let page = firstPage; page < Math.min(meta.pages, firstPage + 3); page++) {
+      queue(page, 0, true);
+      if (detail > 0) queue(page, detail, true);
+    }
+    for (let page = firstPage + 3; page < Math.min(meta.pages, firstPage + 6); page++) queue(page, 0, true);
+    const reordered = [...desired, ...warmQueue.filter(payload => !seen.has(payload))].slice(0, 128);
+    warmQueue.splice(0, warmQueue.length, ...reordered);
+    warmKeys.clear(); for (const payload of warmQueue) warmKeys.add(payload);
     if (warmQueue.length && !warmTimer) warmTimer = setTimeout(warmNext, 15);
   }
   const resource = (method: string, payload: string, ifRevision?: string): MangaResource => {
@@ -99,7 +130,7 @@ export function mangaMethods(root: string, budget = { maxEntries: 512, maxBytes:
         const meta = metaFor(pack), index = Number(entry);
         if (meta && index >= 2) {
           const page = Math.floor((index - 2) / tilesPerPage(meta));
-          if (page + 1 < meta.pages) warmPages(pack, page + 1);
+          if (page < meta.pages) warmPages(pack, page, index);
         }
       }
     }

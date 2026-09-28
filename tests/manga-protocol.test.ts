@@ -19,16 +19,18 @@ import type { OffloadResult } from "../framework/src/offload.ts";
 const key = "31".repeat(32);
 const summary = { slug: "book", title: "漫画 😀", pages: 1, direction: "rtl" as const, pack: "mg-test" };
 const meta = { ...summary, pageW: 256, pageH: 256, levels: [{ scale: 0.5, cols: 1, rows: 1 }] };
-function library(pages = 1, detail = false) {
+function library(pages = 1, detail = false, rows = 1) {
   const root = mkdtempSync(join(tmpdir(), "manga-protocol-")), store = new MangaStore(root);
   const pixels = Uint8Array.from({ length: 256 * 256 * 2 }, (_, n) => (n * 131 + 17) & 255);
-  const pack = createResourcePack(join(root, "packs", "mg-test.prp"), 2 + pages * (detail ? 2 : 1));
-  pack.add(Buffer.from(JSON.stringify({ ...meta, pages, levels: detail
-    ? [{ scale: 0.5, cols: 1, rows: 1 }, { scale: 1, cols: 1, rows: 1 }] : meta.levels })));
+  const pack = createResourcePack(join(root, "packs", "mg-test.prp"), 2 + pages * (detail ? 2 : rows));
+  pack.add(Buffer.from(JSON.stringify({ ...meta, pages, pageH: rows > 1 ? 512 * rows : meta.pageH, levels: detail
+    ? [{ scale: 0.5, cols: 1, rows: 1 }, { scale: 1, cols: 1, rows: 1 }]
+    : [{ scale: 0.5, cols: 1, rows }] })));
   pack.add(prepareTiledRGB565(pixels.slice(0, 128 * 128 * 2), 128, 128), { width: 128, height: 128 });
   for (let page = 0; page < pages; page++) {
     if (detail) pack.add(prepareTiledRGB565(pixels.slice(0, 128 * 128 * 2), 128, 128), { width: 128, height: 128 });
-    pack.add(prepareTiledRGB565(pixels, 256, 256), { width: 256, height: 256 });
+    for (let tile = 0; tile < (detail ? 1 : rows); tile++)
+      pack.add(prepareTiledRGB565(pixels, 256, 256), { width: 256, height: 256 });
   }
   pack.finish(); store.publish({ ...summary, pages });
   return { root, store, pixels, close() { store.close(); rmSync(root, { recursive: true, force: true }); } };
@@ -118,6 +120,43 @@ test("companion prepares current detail and next-page preview and detail before 
       expect(service.resource("manga.image-z", `mg-test/${entry}`).compressed?.pixels.length).toBeGreaterThan(0);
     expect(service.cacheStats().conversions).toBe(before);
   } finally { service.close(); f.close(); }
+});
+
+test("companion warms complete nearby pages and promotes a distant page turn", async () => {
+  const f = library(10, false, 3), service = mangaMethods(f.root);
+  try {
+    service.resource("manga.read", "mg-test/0");
+    expect(service.cacheStats().maxBytes).toBe(128 * 1024 * 1024);
+    service.resource("manga.image-z", "mg-test/26"); // page 8, first tile
+    await until(() => service.cacheStats().warmed >= 3);
+    const before = service.cacheStats().conversions;
+    service.resource("manga.image-z", "mg-test/29"); // page 9, first tile
+    expect(service.cacheStats().conversions).toBe(before);
+    await until(() => service.cacheStats().warmed >= 6);
+    const warmed = service.cacheStats().conversions;
+    for (const entry of [26, 27, 28, 29, 30, 31]) service.resource("manga.image-z", `mg-test/${entry}`);
+    expect(service.cacheStats().conversions).toBe(warmed);
+  } finally { service.close(); f.close(); }
+});
+
+test("zooming into a tile prepares its neighboring detail tiles on the companion", async () => {
+  const root = mkdtempSync(join(tmpdir(), "manga-zoom-warm-")), service = mangaMethods(root);
+  try {
+    const pixels = new Uint8Array(256 * 256 * 2).fill(37);
+    const pack = createResourcePack(join(root, "packs", "mg-zoom.prp"), 8);
+    pack.add(Buffer.from(JSON.stringify({ ...meta, pack: "mg-zoom", levels: [
+      { scale: 0.5, cols: 1, rows: 1 }, { scale: 1, cols: 1, rows: 1 }, { scale: 2, cols: 2, rows: 2 },
+    ] })));
+    pack.add(prepareTiledRGB565(pixels.slice(0, 128 * 128 * 2), 128, 128), { width: 128, height: 128 });
+    pack.add(prepareTiledRGB565(pixels.slice(0, 128 * 128 * 2), 128, 128), { width: 128, height: 128 });
+    for (let n = 0; n < 5; n++) pack.add(prepareTiledRGB565(pixels, 256, 256), { width: 256, height: 256 });
+    pack.finish();
+    service.resource("manga.image-z", "mg-zoom/4");
+    await until(() => service.cacheStats().warmed >= 3);
+    const before = service.cacheStats().conversions;
+    for (const entry of [5, 6, 7]) service.resource("manga.image-z", `mg-zoom/${entry}`);
+    expect(service.cacheStats().conversions).toBe(before);
+  } finally { service.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("Relay download and progress leave a complete library readable with only the terminal", async () => {
