@@ -411,10 +411,13 @@ dist/launcher/symbian/launcher-main.sis
 dist/launcher/symbian/launcher-main.receipt.json
 ```
 
-To check orientation on the device, launch the app in landscape, change some visible
+For physical acceptance, launch the app in landscape, change some visible
 state, then close/open the keyboard or rotate the phone. The UI should fill and
 reflow at `360x640`, preserve that state, and return to `640x360` without a
 restart, red error screen, stale strip, or black margin.
+
+`PocketJS E7 Runtime` version `1.1.1` passed the original manual landscape/portrait
+launch and live-relayout check on an RM-626.
 
 ## Optional CODA device agent
 
@@ -457,9 +460,9 @@ Success includes the CODA process context, for example
 terminates an existing process; close the app first if CODA reports that it is
 already running.
 
-This remote-launch path supports device testing. It does not provide a
+This is a repeatable remote-launch path for device testing, not yet a
 source-level debugger. CODA also exposes run control, logging, memory,
-registers, and breakpoints, but PocketJS does not provide the CODA-to-GDB
+registers, and breakpoints, but PocketJS does not yet ship the CODA-to-GDB
 adapter, a Symbian GDB, or the matching native symbol artifact. QuickJS
 source-level breakpoints require a separate PocketJS DevTools transport.
 
@@ -478,7 +481,7 @@ install-server policy.
 
 ## PocketJS port boundary
 
-The toolchain provides the GCCE-compatible Rust core, QuickJS execution
+The toolchain now implements the GCCE-compatible Rust core, QuickJS execution
 and Promise-job draining, the base HostOps surface, embedded compiled
 JavaScript and `.pak` resources, fixed-step presentation, live native-viewport
 relayout, buttons, native touch, independent app identities, and cold
@@ -487,12 +490,14 @@ native package and delivery substrate repeatable. A signed SIS is
 time-dependent and therefore is not expected to be byte-for-byte reproducible
 between builds.
 
-**`symbian-e7-dev` is a private profile.** It targets the RM-626 configuration
-below; installation and orientation behavior need device checks. The CODA USB
-command checks transport and the TCF Locator session, while MTP carries files.
-**The profile advertises `input.buttons`, `input.touch`,
-`display.viewport.live` and `text.glyphs.baked`.** Its native Qt viewport
-changes between 640×360 and 360×640 within the declared 360×360–640×640 bounds.
+Those implementation milestones do not make Symbian a production PocketJS
+target. Installation, launch, visible output, and live landscape/portrait
+relayout are confirmed on one RM-626, but that single manual check is not
+repeatable golden validation. The CODA USB command verifies the transport and
+TCF Locator session, while MTP remains the implemented file-delivery path.
+`symbian-e7-dev` stays private until the host passes a full physical-device
+acceptance suite and repeatable visible-output/button-input golden tests. Touch
+is specifically outside the published contract during that period.
 
 ## Device and privacy boundaries
 

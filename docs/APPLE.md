@@ -9,15 +9,16 @@ NativeScript side is the published
 whose npm package carries a prebuilt `PocketApple.xcframework` — the default
 flow needs **no Rust toolchain**.
 
-## Supported configuration
+## Current status
 
-**The CLI targets an arm64 iOS simulator with the `ios-dev` profile.**
-`apps/nsengine` exercises touch with aspect-fit coordinate mapping, the `ns.ping`
-guest/host service, and external-guest access to the NativeScript runtime.
-Bundles and hosts must publish the same target and ABI identity.
-
-Physical-device operation is not validated by this profile. Simulator frame
-rates do not establish physical-device performance.
+| Claim | Evidence |
+| --- | --- |
+| Guest boots, renders, animates at 60 fps | iOS 26.5 simulator, `apps/nsengine` at density 4 |
+| Touch reaches the guest with aspect-fit inverse mapping | `Ping host` pressable increments on tap |
+| Guest ↔ host service round trip | `ns.ping` → shell reply renders in the guest stat tile, unprompted on mount |
+| External-guest mode (the app's JS runtime is the guest engine) | Guest code reads `UIDevice.currentDevice.systemVersion` |
+| Platform-contract identity enforced end to end | Plan-built bundles bake `ios-dev`/7 and mount only on hosts publishing the same pair |
+| Real-device run | **Not yet exercised** — simulator only |
 
 ## One-time setup
 
@@ -57,8 +58,9 @@ density and rastered at another renders soft text. `--density=1..4`, default 3.
 
 ## The ios-dev profile
 
-`tools/ios-profile.ts` defines a private registry outside `POCKET_TARGETS`.
-The profile declares:
+`tools/ios-profile.ts` follows the transitional pattern
+(`tools/iphone2g-profile.ts`): a scoped registry that stays out of
+`POCKET_TARGETS` until the host has device-level acceptance. Profile:
 platform `ios`, form `embedded` (a fixed 480×272 logical viewport letterboxed
 by the view), presentations `native` + `integer-fit`, capabilities
 `input.touch` + `text.glyphs.baked` only — `PocketSurfaceView` reports no

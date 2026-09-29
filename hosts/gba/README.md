@@ -2,7 +2,7 @@
 
 This experimental host builds the 240 × 160 [`apps/gba-hero`](../../apps/gba-hero) scene into a Game Boy Advance ROM. **MicroTS compiles the TypeScript model and TSX view into Rust.** The ROM runs the generated application, button input, signals, conditional content and animations without a JavaScript VM or operating system.
 
-**The host runs in mGBA; physical hardware is untested.** The configured simulation rate is 30 Hz, but the CPU workload exceeds the two-VBlank presentation budget.
+**The current scope is ROM construction and emulator startup.** The target is 30 FPS; the build using the core's normal layout path measures about 11 FPS in mGBA. The page labels 30 FPS as a target. Physical hardware has not been tested.
 
 ## Build
 
@@ -40,7 +40,7 @@ The [startup code](src/start.s) initializes RAM and the stack before entering Ru
 
 The sprite presenter reserves 35 OAM slots and 17,920 OBJ VRAM bytes. The assets include eight spinner frames, 145 underline widths, 21 button colors, counter glyphs and a conditional message. Font and image pixels are consumed by the desktop baker; the cartridge uses the resulting tiles.
 
-The application advances simulation time by 1/30 second per update and schedules presentation after two hardware VBlanks when work fits the deadline. **The CPU workload exceeds that budget**, so wall-clock animation and presentation are slower than the configured simulation rate.
+The application advances simulation time by 1/30 second per update and schedules presentation after two hardware VBlanks when work fits the deadline. **The current CPU workload exceeds that budget**, so wall-clock animation and presentation are slower than the configured simulation rate. Performance work is separate from this initial host.
 
 ## Limits
 
@@ -48,4 +48,4 @@ This is a fixed Hero scene presenter. It does not translate arbitrary draw lists
 
 Palette reduction limits color precision. Shadows and edge coverage are blended against the baked background. Underline width is rounded to a pixel and button colors select one of 21 samples. Layout changes require rebuilding the assets and updating the presenter bindings.
 
-There is no audio, storage, networking or OS service layer.
+There is no audio, storage, networking or OS service layer. Emulator startup and input checks do not establish physical GBA support or completion of the 30 FPS target. Keep ROM copies, measurements and screenshots in ignored `.pocket-build/validation/gba/` output or an artifact store.

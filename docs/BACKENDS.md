@@ -231,8 +231,8 @@ X,Y[,d|u|r]@TICK` (drags, right clicks), `--key
 | pixel goldens      | `tests/golden-specs.ts`, tape hashes                             | opted out (note-style verification)         |
 | rotated/3D content | native                                                           | portable rasterizer as a local sub-backend  |
 
-The [desktop benchmark](bench/gpui-vs-tauri-electron-2026-08-18.md) describes
-the harness and measurements for the legacy gpui host, Tauri and Electron.
+The desktop benchmark against Tauri and Electron (harness, comparison
+apps, results) lives in its own stacked PR — pocket-stack/pocketjs#294.
 
 
 `hosts/desktop --trace-frames` emits CPU tick, render-submission, worker-total

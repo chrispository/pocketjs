@@ -1,9 +1,10 @@
 # The Audio Module
 
-**The audio module exposes PCM streams through `globalThis.audio`.**
-`contracts/spec/audio.ts` defines its operations, events, sample formats and
-frame contract. Hosts implement that protocol; applications use
-`@pocketjs/framework/audio`.
+Audio is PocketJS's third module (after the ui surface and OpenStrike's
+`strike`), and the first written spec-first: the boundary existed before any
+host code, every host implements the same pinned protocol, and a developer
+adding an audio feature extends the spec instead of forking a host.
+`contracts/spec/audio.ts` is normative; this page is the map.
 
 ```
 platform audio device (AudioWorklet · sceAudio · CPAL · …)     Host / substrate
@@ -85,7 +86,7 @@ parsed guest-side by `decodeWav` (RIFF walk, PCM16 only, rates as above —
 anything else throws at decode time). `apps/music/gen-assets.ts`
 deterministically synthesizes the demo's three original 5-second tracks;
 `tests/audio.test.ts` pins their SHA-256. Raw-PCM entries and codec
-registration are not part of the audio asset contract.
+registration are deliberately deferred until a second format needs them.
 
 ## The demo (and the golden-safety property)
 
@@ -97,13 +98,13 @@ one `pump()` per frame.
 The **tick clock stays authoritative**: position, equalizer and track advance
 are the same frame counters with or without audio, and the player only
 follows them. `tests/audio-sim.test.ts` pins this by running the same journey
-with the module mounted and absent and asserting byte-identical pixel hashes.
-Visual state driven by device-clock audio events would require those events
-to be captured as replay inputs.
+with the module mounted and absent and asserting byte-identical pixel hashes
+— which is why all 17 committed music goldens (web + psp×3 + vita) remained
+valid without re-baking. A demo that *reacted* to audio events visually would
+break exactly this; don't.
 
-## Contract limits
+## Deferred (triggers in the ontology doc)
 
-The module does not provide mixing across runtimes, codec registration,
-raw-PCM PAK entries or runtime capability negotiation. A host advertises
-`audio.pcm` through its target profile. New operations must preserve the
-existing numeric op codes and event formats.
+Host-level mixing across runtimes, codec registration, raw-PCM pak entries,
+and any runtime capability negotiation are all deferred until their trigger
+conditions exist. The spec grows append-only when they do.

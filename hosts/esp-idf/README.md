@@ -51,9 +51,9 @@ runner. Neither example initializes a panel or reads a device input driver.
 `tests/data-smoke` is an independent ESP32-P4 conformance binary for the DB/FS
 module cores over LittleFS. It does not add DB/FS to the UI components or their
 dependency graph. The test retains its own Rust and ESP-IDF v5.5.3 toolchain
-pin.
+pin until that data-module fixture is upgraded separately.
 
-## Packaging
+## Maintainer workflow
 
-Archive metadata, Registry packaging, and build commands are described in
+Archive receipts, Registry packaging, CI, and hardware gates are described in
 [`docs/ESP_IDF.md`](../../docs/ESP_IDF.md).

@@ -10,8 +10,8 @@ protocol — the op table, the frame entry, the embedded `__pocket_js` /
 architecture. The target remains outside the public `POCKET_TARGETS` registry.
 
 The bundled application is Pocket Clear (`apps/clear`), a Vue Vapor guest
-whose controls use gestures. The `clear_gesture` action counter reports
-completed application interactions.
+whose input is entirely gestures; its acceptance receipt is the
+`clear_gesture` action counter.
 
 Clear also supports **companion-backed Chinese pinyin composition** through
 `io.offload`. The device owns the editor and a bounded input transcript; a
@@ -34,7 +34,7 @@ single-touch entry points, so existing tapes and hosts decode unchanged. The
 ## Device state
 
 The device must be jailbroken before the PocketJS tool connects (p0sixspwn on
-iOS 6.1.6 is untethered). The deployment tools require:
+iOS 6.1.6 is untethered). The completed bootstrap provides:
 
 - Cydia and a read/write root filesystem;
 - OpenSSH on device port 22;

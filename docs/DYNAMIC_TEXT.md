@@ -174,7 +174,7 @@ and missing-glyph cases display `EXPECTED` only when the returned error matches
 the injected condition. Provider errors remain errors. These cases do not
 appear in the library/reader navigation.
 
-To check loading and recovery:
+Acceptance checks:
 
 1. Pause on a new chapter: the skeleton keeps animating and controls work.
    Resume: the first content frame contains the complete visible page.
@@ -224,13 +224,14 @@ queued GE commands stay immutable until `sceGuSync`. When every GPU page is
 pinned, rendering uses CPU source coverage. Source leases preserve glyph
 identity across that GPU replacement policy.
 
-## Migrating draw-triggered loading
+## Migration from #426
 
 Remove `blockMs` and replace draw-triggered loading with `prepareText()` leases.
 Use `Text resource` or a `ResourceBoundary` for atomic presentation. Set
-`provider: 'local'` when retaining device storage; the default is companion.
-The external PJFA/1 archive format is unchanged. The editor-oriented `text.glyph` image cache and PSPMAN's PJPF/1 format use
-separate storage contracts; `prepareText()` does not convert them.
+`provider: 'local'` when retaining device storage; the new default is companion.
+The external PJFA/1 archive format is unchanged. The former editor-oriented
+`text.glyph` image cache and PSPMAN's separate PJPF/1 format are not converted by
+this change.
 
 ## Adopting the shared API from a downstream font extension
 
@@ -262,7 +263,7 @@ and the resident set before choosing capacity. Each strike consumes its own
 cells; every slot shares the native byte limit. The loader does not decode ID3
 tags, repair malformed Unicode, perform shaping, or create missing font outlines.
 
-### Archive and residency tests
+### Regression coverage without a downstream source tree
 
 `tests/text-batch.test.ts` drives the production companion reader, batch
 controller and WASM core with 1000 runtime titles at regular 12/14/16/24 px and
@@ -278,7 +279,19 @@ when implicit closure is removed. The built Text Lab test covers atomic reveal,
 loading animation, cancellation and recovery. Native tests check actual vector
 capacity after slot detach and retry after a partially overwritten index page.
 
-**Rebuild archives generated without contour closure.** Changing residency or
-increasing a cache cannot repair an incorrect bitmap stored in an old archive.
-The shared font tests do not cover an application’s metadata decoding or
-playback pipeline; test those paths with the application’s own inputs.
+PSPMAN's [public report #58](https://github.com/obsoletesony/PSPMAN-Issues/issues/58)
+describes `迫` rendering incorrectly in Alpha 4. Its diagnostic log reports zero
+capacity, decode and read failures. Comparing the published Alpha 4 and Alpha 5
+PJPF files finds the same 6790 codepoints. At 16 px, the historical PocketJS
+baker before `1446d244` reproduces Alpha 4's `気迫Ａ１` coverage byte for byte after
+four-bit quantization; adding contour closure reproduces Alpha 5. The current
+baker also matches Alpha 5 for those cells. This isolates a reproducible asset
+generation defect without the private application source. The
+[Alpha 5 release notes](https://www.obsoletesony.com/pspman/releases) report a
+Japanese rendering improvement. This comparison does not establish which
+private commit changed PSPMAN or validate its metadata and playback pipeline.
+
+Rebuild old assets when adopting the shared API. Mainline already contains the
+contour closure fix; changing residency or increasing a cache cannot repair an
+incorrect bitmap stored in an old archive. **These tests validate the shared
+font functionality; downstream application acceptance remains a separate run.**

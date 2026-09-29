@@ -322,7 +322,7 @@ That density-1 development command writes the bundle and its packed assets to
 `dist/`; the per-framework file names are in
 [Build pipeline](/docs/build-pipeline/#output-naming). The dev host and the sim
 are development paths rather than stock targets — see
-[Host-specific profiles](/docs/platform-contracts/#host-specific-profiles).
+[Transitional dev targets](/docs/platform-contracts/#transitional-dev-targets).
 
 A few notes on the low-level command:
 

@@ -32,17 +32,11 @@ the `harness-access` feature on `pocketjs-ui-cabi` and use the unsafe
 lifecycle contract. Production hosts leave all opt-ins disabled and continue
 to use only the C ABI.
 
-## Tests
+## Validation
 
-Run the native harness and UI C ABI tests from the repository root:
-
-```sh
-bun test --conditions=browser tests/quickjs-c-harness.test.ts
-cargo test --locked --manifest-path engine/ui-cabi/Cargo.toml --features harness-access
-```
-
-The native harness tests execute all four stage/dispatcher switch combinations
-against QuickJS/UI stubs.
+The `Native C harness` pull-request workflow runs on Linux and macOS. It builds
+and executes all four stage/dispatcher switch combinations against QuickJS/UI
+stubs, runs renderer contracts, and tests `ui-cabi` with `harness-access` enabled.
 The stubs cover runtime control flow; they do not replace a real QuickJS
 benchmark run.
 

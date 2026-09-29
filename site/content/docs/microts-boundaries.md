@@ -196,6 +196,13 @@ completion listener and leaves the native track's motion intact.
 | Board admission | `--board` checks the declared input profile; it does not establish a native port, rendering backend or device toolchain |
 | Packaging | Native builds need the generated Rust, asset loading, a host and its target toolchain; guest `.pocket` packaging does not compile a Rust AOT binary |
 
+Testing compares the reference interpreter, the transformed TypeScript model
+and generated Rust on recorded frames, including state and commands. Selected
+bounded fixtures verify zero allocations after mount; this result applies to
+those fixtures. The Solid lab also runs under a 24 MiB allocation cap.
+ESP32 compile/link validation establishes a build result; it does not establish
+on-device latency, pixels or input behavior. Fuzz runs remain a local command.
+
 See [TypeScript support](/docs/typescript-support/) for the language comparison,
 [TypeScript models to Rust](/docs/microts-model/) for the model runtime,
 [Solid TSX](/docs/microts-solid/) and [Vue views](/docs/microts/) for

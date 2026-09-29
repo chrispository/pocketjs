@@ -1,8 +1,8 @@
 # Text layout and reusable glyph resources
 
-**Glyph coverage is cached by glyph identity.** Deleting a resident character or moving the caret updates the label’s positions while retaining coverage for the surviving characters.
+**Editing a label must not invalidate every pixel in that label.** Clear's former `remoteText` implementation keyed coverage by the whole string. Replacing `Tap to Edit 你好` with `Tap to Edit 你` discarded the complete tile grid and showed a skeleton while the companion rasterized another string. The same invalidation occurred when the inline caret moved.
 
-## Scalar line layout
+## Current implementation
 
 `@pocketjs/framework/text` owns a realm-wide glyph resource cache and creates bounded line layouts. `@pocketjs/framework/text-view` paints those layouts into a retained child pool. These modules have no Solid, Vue or IME dependency. Clear's Vue adapter supplies lifecycle, color and conversion-wait presentation.
 
@@ -21,13 +21,13 @@ The companion exposes `text.font` and `text.glyph` through `tools/text-glyph-pro
 
 **One `createResourceScheduler` owns glyph work per realm.** It allows two concurrent reads, one new read per frame and one materialization per frame. The cache admits at most 96 glyphs and reserves at most 32 KiB per glyph before allocation. Visible layouts pin their demands; the editor and candidate viewport have priority over surrounding rows. Clear supplies its row viewport with one row of overscan. Completed entries remain cached after a label releases them, subject to eviction.
 
-Coverage remains packed at two bits per pixel. The native decoder accepts a power-of-two envelope of at most **8,192 pixels**, using the same 32 KiB scratch buffer and one-upload-per-frame budget. A glyph can use a tall rectangle instead of several 16-pixel strips. The coverage operation carries these rectangles without an additional renderer opcode. The host decoder must support the declared envelope bounds.
+Coverage remains packed at two bits per pixel. The native decoder accepts a power-of-two envelope of at most **8,192 pixels**, using the same 32 KiB scratch buffer and one-upload-per-frame budget. A glyph can use a tall rectangle instead of several 16-pixel strips. This extends the existing coverage operation without adding a renderer opcode. The device app must be rebuilt for the expanded rectangle bounds.
 
 `TextLayout` retains the source string and UTF-16 ranges alongside positioned parts. `createTextPainter` retains the source in the framework mirror for inspection. Glyph handles belong to the resource cache; a painter cannot free a handle borrowed by another label. The current painter preserves Clear's white coverage and dimmed completion palette. Arbitrary glyph colors need per-draw mask tint in the shared core's text contract.
 
 ## Framework architecture for shaped text
 
-**Scalar lookup is not a complete Unicode shaping model.** The current core's baked font path maps code points through a cmap and sums advances. The native text backend can install host measurement and wrapping. The scalar line API does not provide bidi resolution, ligatures, contextual Arabic shaping or grapheme-aware editing. The [portable text service](TEXT-OFFLOAD.md) provides a separate shaping API.
+**Scalar lookup is not a complete Unicode shaping model.** The current core's baked font path maps code points through a cmap and sums advances. The native text backend can install host measurement and wrapping. The implementation above extends the baked scalar path; it does not add bidi resolution, ligatures, contextual Arabic shaping or grapheme-aware editing.
 
 The general text system needs separate source, shaping, glyph and line-layout records:
 
@@ -53,17 +53,17 @@ flowchart LR
 
 **Glyph IDs and source characters are different identities.** A ligature can cover several characters; a character can produce several glyphs. HarfBuzz exposes clusters and flags boundaries that require reshaping after a break. Editing boundaries also need Unicode grapheme segmentation. These facts prevent a universal implementation from treating `Array.from(text)` as a shaping or editing algorithm. See the [HarfBuzz shaping guide](https://harfbuzz.github.io/getting-started.html) and [Unicode text segmentation](https://www.unicode.org/reports/tr29/).
 
-A portable shaping provider must keep segmentation, shaping, line breaking and cluster-to-caret mapping consistent across native hosts and WASM. Worker execution and companion execution must return the same record format. The guest receives plain records with source revisions and positions, never a platform font object. Rime continues to return Unicode text and candidates; it does not own font selection or layout.
+The portable implementation should place segmentation, shaping, line breaking and cluster-to-caret mapping in one Rust module compiled for native hosts and WASM. A capable host runs it in a worker; a constrained host sends the same bounded requests to a companion. The guest receives plain records with source revisions and positions, never a platform font object. Rime continues to return Unicode text and candidates; it does not own font selection or layout.
 
 An edit invalidates the affected shaping runs and any context required by their shaping boundaries. Unaffected runs retain their metrics and glyph references. A line-width change can reuse shaping and glyph resources while recomputing line breaks. A color change affects paint alone. A density change can request another raster rendition without changing logical caret positions.
 
 **No deleted character may remain visible while a replacement is pending.** The source model applies the edit at the input edge. For an independent resident cluster, local layout removes it and moves the surviving glyphs in the same update. For contextual text, the shaper determines the affected range; the UI retains unaffected runs and confines any temporary presentation to that range. A universal guarantee of zero network work requires a resident shaper and the required font resources, not a whole-string bitmap cache.
 
-## Integration boundaries
+## API migration
 
-The scalar cache and painter use explicit lifecycle calls and have no UI-framework dependency. Clear connects these calls through its view adapter. A shared-core integration for shaped text must carry shaped runs and glyph references with their measurement records; scalar coverage alone cannot supply cluster-aware selection or wrapping.
+The cache and painter in this change are usable by any PocketJS UI framework through explicit lifecycle calls. They provide the scalar line path used by Clear on both devices. The next native text contract should accept shaped runs and glyph references through the shared core, so `<Text>` can use these resources with the same measurement and paint records. That work also needs glyph-upload admission, native/WASM equivalence tests, cluster-aware selection and wrapping tests. It is separate from the scalar coverage implementation shipped here.
 
-Cross-provider checks must compare source offsets, metrics and pixels for Latin kerning and ligatures, Han edits, combining marks, emoji sequences, Arabic joining, mixed-direction selection and font fallback. Font revision changes, density changes and eviction with multiple views also change resource identity or ownership.
+Acceptance for that contract should include Latin kerning and ligatures, Han insertion/deletion, combining marks, emoji sequences, Arabic joining, mixed-direction selection, font fallback, font revision changes, density changes and cache eviction with multiple views. Each case must compare source offsets, metrics and rendered output across native and WASM providers.
 
 ## Clear candidate panel
 

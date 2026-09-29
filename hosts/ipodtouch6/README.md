@@ -9,7 +9,7 @@ input, networking, or device SDK objects to application code.
 The executable statically links `engine/ios` and uses the shared
 `PocketSurfaceView`. Its target identity is `ipodtouch-dev` with host ABI 7.
 The NativeScript simulator shell retains the default `ios-dev` identity; the
-identity-aware initializer prevents the two build profiles from being
+new identity-aware initializer prevents the two build profiles from being
 interchangeable. This host selects the view's explicit 60 Hz run-loop timer
 because the tested jailbroken iOS 12 runtime does not deliver
 `CADisplayLink` callbacks; other Apple hosts keep the display-link clock.
@@ -30,10 +30,10 @@ installed transactionally at `/Applications/PocketJSiPod.app`, pseudo-signed
 with `ldid`, registered with `uicache`, and launched through its URL scheme.
 
 The app writes a fresh status record and a screen capture to
-`/private/var/tmp`. **The status command checks for a live PID, advancing guest
+`/private/var/tmp`. **Runtime acceptance requires a live PID, advancing guest
 frames, an error-free receipt, a completed touch sequence, and a changed
-`hero_tap` action.** Use it after interacting with the running app to check
-guest execution and input dispatch.
+`hero_tap` action.** Build, copy, `uicache`, or launch success alone does not
+establish that the guest rendered or handled input.
 
 `Icon.svg` is the source of truth for app artwork. The build bakes opaque iOS
 PNG sizes and the 4-inch launch image from that SVG; generated PNG files stay

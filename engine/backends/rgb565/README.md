@@ -64,6 +64,6 @@ lets two reusable strips overlap CPU rendering with asynchronous presentation.
 Run the portable renderer and pixel-parity tests on the host:
 
 ```sh
-cargo test --locked --manifest-path engine/backends/rgb565/Cargo.toml \
+cargo test --locked --manifest-path engine/backends/esp32p4-ppa/Cargo.toml \
   --features std
 ```

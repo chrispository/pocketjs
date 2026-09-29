@@ -4,9 +4,9 @@
 paired provider. **The guest does not receive a socket, filesystem handle, SQL
 connection, or synchronous provider call.** The provider owns those resources.
 
-`@pocketjs/framework/offload` provides the guest client. Host workers carry
-requests to a Bun provider transport; Pocket Doc uses this capability from its
-application code.
+This implementation is independent of `feat/companion` (#360). It adds
+`@pocketjs/framework/offload`, a 3DS worker transport, and a Bun provider
+transport. Pocket Doc is a separate application using the capability.
 
 ## Frame contract
 
@@ -138,7 +138,7 @@ vblank wait. A frame-count delta also reveals lost presentation cadence.
 The same request contract can use a provider on the device itself. That host
 still needs a worker/process transport with enforced queues and resource
 budgets; calling a local provider directly from JS would violate the contract.
-**The iPhone host has no local provider backend.**
+**An iPhone-local provider backend is not implemented by this change.**
 
 ## Validation
 
@@ -148,7 +148,7 @@ The fixture exercises 100,000 full-size concurrent records, queue saturation,
 counter wrap and coverage decoding. Tests also exercise fragmented UTF-8,
 timeouts, cancellation, stale sessions, no mutation replay, provider grants,
 SQLite result budgets, HTTP redirects and oversized bodies. These checks are
-separate from device performance and interaction tests.
+separate from device performance and interaction acceptance.
 
 Reusable reads can use the [shared resource scheduler](RESOURCES.md#shared-read-scheduling)
 for admission, priority, caching and bounded materialization. Commands retain

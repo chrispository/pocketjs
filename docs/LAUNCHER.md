@@ -3,12 +3,14 @@
 One device package — PSP EBOOT, Vita VPK, or Nokia E7 SIS — with every target-compatible
 app inside and a Cover Flow picker on top. This document is the contract for
 the multi-app host, the three `app*` surface ops, and the SELECT summon policy.
-**The launcher is a guest application.** It selects another guest through the
-app-switching surface described in [RUNTIMES.md](RUNTIMES.md).
+RUNTIMES.md owns the ontology; nothing here changes it — a launcher is an
+ordinary Guest that happens to pick the next Guest (rule 5: the capability is
+a surface op, not a host branch).
 
 ## Model
 
-**Exactly one guest is alive at a time.** "Switching" is the same whole-guest swap every host already performs
+The runtime stays `⟨Cores, Surfaces, Guest⟩` with exactly ONE guest alive at
+a time. "Switching" is the same whole-guest swap every host already performs
 (browser `load()`, pocket-mod drop-and-rebuild, golden's per-demo fresh
 core): finish the current frame, tear the guest down (free the QuickJS
 runtime, drop the `Ui` core), boot the next bundle from scratch (fresh core,
@@ -16,7 +18,7 @@ pak feed, fresh realm, eval). There is no suspend: **resume = relaunch**.
 The frozen last frame of the interrupted app is a visual affordance handed
 to the launcher, not a saved state.
 
-The host can hold more than one embedded bundle, expose the
+What IS new: the host can hold more than one embedded bundle, expose the
 table of them to the guest, accept a switch request, and reserve SELECT as
 the system summon chord.
 
@@ -223,13 +225,15 @@ timebase, never a launcher-name branch or a `slowPsp` capability.
 - None of these suites commits launcher pixels as goldens: covers are live sim
   renders of the other demos, and a committed deck PNG would break on any
   demo's visual change. Determinism is asserted by hash equality instead.
-- The GE leaves framebuffer alpha at 0, so
+- Native gotcha the e2e caught: the GE leaves framebuffer alpha at 0, so
   the frozen-shot capture forces alpha 255 or the background blends away.
-- Device checks cover clock configuration, affine sampling, texture memory,
-  4444 alpha banding, crop geometry and transition seams. These behaviors
-  depend on the native renderer and are not established by sim output.
-  Measure PSP Cover Flow pacing with held browse input on the device, and
-  check Vita resource reuse across repeated guest switches.
+- PSP real-hardware functional pass: DONE (PSPLINK, iterated live) — it found the clock
+  never being set, the affine seam, the texture-heap OOM, 4444 banding,
+  the crop deformation and the sweep seams; each fix is annotated at its
+  site. PPSSPP's software GE reproduces most of these; the sim none. The Vita
+  VPK also passed real-device switching tests after deterministic Vita3K
+  coverage; PSP Cover Flow pacing under held browse input remains a separate
+  real-hardware performance gate.
 
 ## The launcher app
 

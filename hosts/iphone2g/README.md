@@ -1,6 +1,6 @@
 # iPhone 2G / iPhone OS 3.1.3 host
 
-This is the development PocketJS host for the original iPhone
+This is the deliberately private PocketJS host for the original iPhone
 (`iPhone1,1`). The connected-device target is iPhone OS 3.1.3 (`7E18`). Xcode
 26 still emits ARMv6 and `ld-classic` links against the byte-verified stock
 1.1.4 (`4A102`) sysroot, so 1.1.4 is the executable's linker ABI floor rather
@@ -46,24 +46,31 @@ bun iphone2g device-status
 That command accepts only a fresh schema-2 status record for the current build.
 **The recorded process must still be alive, its heartbeat must be recent, a
 touch release must have completed, and the application must have reported a
-changed `hero_tap` count.** The command uses these fields to check guest
-execution and input dispatch.
+changed `hero_tap` count.** A bounds hit, successful build, or byte-exact
+installation alone is not live runtime acceptance.
 
-The app bundle carries a dedicated 59-by-60
+The earlier schema-1 receipt for build
+`ba1c0b15af4fdb72c6a98334332a8954` reported 118 running guest frames and 11
+touch sequences. It is retained as historical evidence but is no longer
+accepted because it lacks process liveness, heartbeat, release completion, and
+application-action fields. The app bundle carries a dedicated 59-by-60
 transparent-corner icon with black enamel, a chrome bevel, and a pre-baked
 glass highlight for the classic SpringBoard.
-Device-side `/sbin/reboot` can stall on the shutdown spinner on this firmware.
-The device may require a Home + Power restart.
+The phone retained the complete previous app bundle, key-only SSH, and the
+helper across a Home + Power restart after device-side `/sbin/reboot` stalled
+on its shutdown spinner. That is a forced-restart recovery result, not proof
+that unattended `/sbin/reboot` completes on this installation.
 
-The host has two render paths. **The software rasterizer is the default.**
-It limits rasterization and compositing to damaged rectangles. The OpenGL ES
-1.1 backend for the device's PowerVR MBX Lite is opt-in (`touch
-/private/var/tmp/pocketjs-iphone2g.gles1`) and re-submits the whole DrawList
-on each rendered frame.
+The host has two render paths. **The software rasterizer is the default** and
+holds a locked 60 fps at ~7.6 ms per frame, because both the rasterize and the
+composite are limited to the damaged rectangle. The OpenGL ES 1.1 backend for
+the device's PowerVR MBX Lite is opt-in (`touch
+/private/var/tmp/pocketjs-iphone2g.gles1`), correct, and pixel-verified, but
+costs 17-20 ms because it re-submits the whole DrawList every frame.
 
-Use the [performance sampling procedure](../../docs/IPHONE2G.md#sampling-performance)
-to measure startup, animation, and settled content. The same guide documents
-capture markers, byte order, image orientation, and the ES 1.1 state that has
+Both paths are verified against the reference core by capturing the device's own
+output; `docs/IPHONE2G.md` documents the marker files, the byte-order and
+orientation difference between the two captures, and the ES 1.1 state that has
 no ES 2 equivalent.
 
 Artifacts are written to `dist/iphone2g/PocketJSDemo.app`. The app contains
@@ -73,8 +80,8 @@ pairing records, SSH keys, ramdisks, historical bootstrap packages, and Cargo
 target cache live only under the shared Pocket Stack cache. They are never
 copied into the repository.
 
-See `docs/IPHONE2G.md` for the workflow. Deployment does not enter DFU,
-restore firmware, alter
+See `docs/IPHONE2G.md` for the exact workflow and the archived 1.1.4 recovery
+incident. The current deployment does not enter DFU, restore firmware, alter
 activation or baseband state, enable AFC2, replace CustomHJ SSH components, or
 change `fstab`; the restored 3.1.3 root and data volumes remain read/write by
 design.

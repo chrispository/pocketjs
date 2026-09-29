@@ -65,3 +65,6 @@ console/emulator SD. These are rendering checks, not frame-rate measurements.
 
 On macOS with Azahar installed, `bun engine/pocket3d/backends/citro3d/example/capture.ts`
 checks the capture build using an isolated emulator SD and three GPU readbacks.
+
+[Sample capture receipt](example/evidence/receipt.json) records geometry
+visibility and brightness checks for directional, unlit and zero-light passes.

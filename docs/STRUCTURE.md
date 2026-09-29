@@ -1,16 +1,16 @@
 # Repository structure
 
-**Native engines live in `engine/`, platform embeddings in `hosts/`, and
-guest APIs in `framework/`.** Compilers, contracts, applications and tools
-have separate directories. [RUNTIMES.md](RUNTIMES.md) describes how the host
-mounts native interfaces into a guest.
+The tree mirrors the platform ontology from [RUNTIMES.md](RUNTIMES.md) —
+**Cores + Surfaces + Guest** — plus the compiler family, the contracts that
+bind the layers, and the products built on top. One axis per top-level
+directory; nothing else gets a top-level name.
 
 ```
 pocketjs/
 ├─ engine/       Cores: the Rust simulation cores
 │  ├─ core/       pocketjs-core — retained UI tree, taffy layout, damage + raster (standalone crate)
 │  ├─ backends/    platform render backends (ESP32-P4 PPA is a standalone no_std
-│  │              crate; gpui is an optional legacy backend with native
+│  │              crate; gpui is the standalone native desktop backend with native
 │  │              text layout — docs/BACKENDS.md)
 │  ├─ wasm/       core compiled to wasm32 for web/sim hosts (standalone crate)
 │  ├─ ui-cabi/    no_std UI C ABI: software raster + GLES1/GLES2 backends (standalone crate)
@@ -31,7 +31,7 @@ pocketjs/
 │  ├─ ios-nativescript/ NativeScript iOS shell over engine/ios + @nativescript/pocketjs
 │  ├─ blackberry-classic/ input sampling shared by BlackBerry QNX and Android
 │  ├─ blackberry-classic-qnx/ BlackBerry 10 Core Native embedding
-│  ├─ desktop/    winit/wgpu window host — macos-app + linux-app (standalone lone-bin crate)
+│  ├─ desktop/    gpui window host — macos-app + linux-app (standalone lone-bin crate)
 │  ├─ web/        browser dev + Pocket System host (wasm core, isolated iframe Realms)
 │  └─ sim/        deterministic headless simulation host (docs/DETERMINISM.md)
 ├─ framework/    Guest: @pocketjs/framework

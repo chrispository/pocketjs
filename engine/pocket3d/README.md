@@ -29,7 +29,7 @@ any application runtime.
 application repository. Movement and gait policy, expressions, chat, camera,
 scene resources, QuickJS commands and performance scenarios belong to its
 specialized runtime. It pins PocketJS as a submodule instead of carrying a copy
-of Pocket3D.
+of Pocket3D. Reusable fixes enter this repository before the app updates its pin.
 
 ## Layout
 
@@ -58,7 +58,7 @@ engine/pocket3d/
 │                          # embedded `ui` surfaces on meshes, part picking (docs/WIDGET.md)
 └── examples/
     ├── uihost/            # PocketJS UI demos in a native macOS window
-    ├── handheld/          # authored device stages and their 3D host
+    ├── handheld/          # first pocket-stage package + transitional 3D host
     └── note-widget/       # a markdown sticky note — the flat pocket-widget form
 ```
 
@@ -81,8 +81,9 @@ Neither is the `pocket3d-world` simulation crate.
 Movement models have different contracts. `pocket3d-bsp::collide` owns the
 trace-based Quake controller shared by desktop and PSP. `pocket3d-world` owns
 contact-constrained sphere/capsule locomotion and material-dependent grip.
-Island owns its bounded walk region and obstacle policy. Shared solvers use
-collider geometry and material parameters without game-name branches.
+Island owns its bounded walk region and obstacle policy. Changes to one model
+do not add game-name branches to another solver. Shared solver changes must
+preserve their physical invariant across multiple geometries/materials.
 
 Desktop `pocket3d::anim`, `pocket3d::model::Skin` and `pocket3d::world` import
 paths remain available through re-exports. The experimental handheld mesh
@@ -98,7 +99,7 @@ QuickJS guest (`pocket-mod`), the same `pocketjs-core`, rendered through wgpu
 ```sh
 # from the repo root: build a demo, then host it
 bun tools/build.ts hero-main
-cd engine
+cd pocket3d
 cargo run -p uihost -- --app hero-main                # window, 2x scale
 cargo run -p uihost -- --app hero-main --screenshot out.png --frames 10
 ```
@@ -108,13 +109,13 @@ Q/W = triggers, Tab = SELECT, Space = START, Esc quits.
 
 ## pocket-stage — Pocket apps inside authored 3D displays
 
-A pocket-widget runtime: a transparent, undecorated, always-on-top 3D stage
-with an embedded PocketJS screen. The bundled PSP and iPod nano stages use
-`profile.json`. A custom `--profile` selects the model scale, LOD paths,
-display material, camera presets, and CPU pick proxies supported by that
-loader. The package-manifest design in [docs/WIDGET.md](../../docs/WIDGET.md)
-is separate; `pocket-stage.json` is not an accepted loader input.
-The PSP screen is a live `ui` surface (`OffscreenTarget` bound
+The first pocket-widget runtime (docs/WIDGET.md): a transparent, undecorated,
+always-on-top 3D stage with one or more authored display surfaces. The bundled
+stage is a PSP, but the process name is deliberately model-neutral. After the
+manifest-v1 migration described in docs/WIDGET.md, iPod, phone, laptop, television,
+and room packages use the same host. A JSON asset manifest keeps model-specific
+scale, LOD paths, display semantics, camera presets, and CPU pick proxies out
+of the runtime. The PSP screen is a live `ui` surface (`OffscreenTarget` bound
 to the exact semantic glTF material), and its buttons feed real BTN bits — the
 same unmodified bundle uihost runs.
 
@@ -123,7 +124,7 @@ bun run widget                   # from the repo root: build bundle + binary, la
 bun run widget im                # any demo
 bun run widget im --auto-quit 5  # app first; flags and values pass to pocket-stage
 bun run widget -- --profile psp.json --orbit 35,-12
-bun run widget --proof           # ray-pick CIRCLE and check Count: 1
+bun run widget --proof           # ray-picked CIRCLE acceptance → Count: 1
 ```
 
 The optional app name is recognized only as the first argument; otherwise the
@@ -137,7 +138,7 @@ Or by hand:
 
 ```sh
 bun tools/build.ts hero-main   # from the repo root
-cd engine
+cd pocket3d
 cargo run -p pocket-stage -- --app hero-main
 cargo run -p pocket-stage -- --app hero-main --screenshot out.png --frames 30
 ```
@@ -170,7 +171,7 @@ motion.
 
 ## note-widget — a markdown sticky on your desk
 
-A flat pocket-widget runtime: the borderless,
+The first *flat* pocket-widget runtime: no scene at all — the borderless,
 resizable, always-on-top window IS a live `ui` surface, rendered at Retina
 density (density-2 pak + `render_words_scaled`) and demand-driven like every
 widget. The guest is `apps/note` (markdown view/edit, popup menu); the host
@@ -180,7 +181,7 @@ pipeline does all dispatch.
 
 ```sh
 bun tools/build.ts note-main --density=2   # from the repo root
-cd engine
+cd pocket3d
 cargo run -p note-widget
 cargo run -p note-widget -- --file ~/notes/todo.md --width 380 --height 520
 ```
@@ -231,10 +232,10 @@ scroll; the ••• menu has theme/reset/close, edits autosave to `--file`
   `Renderer::render` alongside the existing ones, or hang off
   `Game::overlay`.
 
-## Scope
+## Non-goals for v0.1 (a.k.a. the roadmap)
 
-Pocket3D provides rendering, asset data, animation, and simulation components.
-Applications own gameplay, networking, audio integration, and input policy.
-The BSP loader accepts GoldSrc BSP v30; Source BSP and GoldSrc MDL assets are
-not supported. The [PSP renderer](PSP.md) consumes cooked worlds and applies
-PVS culling through `pocket3d-bsp`.
+PVS culling, audio, crouch/ladders/water movement, GoldSrc MDL models,
+Source BSP, and networking are all explicitly out of scope for this first
+cut. The point was to prove the pipeline end to end: **BSP in, playable
+round loop out** — which OpenStrike does, in its own repo, through the mod
+runtime.

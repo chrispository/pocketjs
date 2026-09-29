@@ -13,7 +13,7 @@ The validated recovery path uses Legacy iOS Kit's iOS 6.1.3 restore with a
 signed 9.3.6 baseband and the Aquila filesystem jailbreak. Restoring creates a
 new partition map and erases the data partition.
 
-The deployment tools require:
+The completed bootstrap provides:
 
 - Cydia and a read/write root filesystem;
 - OpenSSH on device port 22;
