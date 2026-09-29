@@ -545,6 +545,7 @@ describe("semantic resolution", () => {
       "text-cjk": [true, false, false, false],
       note: [false, false, true, true],
       notifications: [true, true, false, true],
+      "sensor-list": [true, true, false, true],
       settings: [true, true, false, true],
       "solid-aot-lab": [true, true, false, true],
       stats: [true, true, false, true],
@@ -557,7 +558,7 @@ describe("semantic resolution", () => {
       const url = new URL(`../apps/${demo}/pocket.json`, import.meta.url);
       if (!existsSync(url)) continue;
       const manifest = await Bun.file(url).json();
-      expect(expected[demo]).toBeDefined();
+      expect(expected[demo], `admission matrix entry for demo "${demo}"`).toBeDefined();
       targets.forEach((target, i) => {
         const result = validateAndResolveBuildPlan(manifest, { target });
         expect(`${demo}@${target}:${result.ok}`).toBe(`${demo}@${target}:${expected[demo][i]}`);
