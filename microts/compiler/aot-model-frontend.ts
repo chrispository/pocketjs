@@ -180,7 +180,23 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
     if (!constantExpression(b.value)) error(b.declaration!.initializer!, "module constants and seeds require literals, constants, or object and array literals of literals");
     current = before; constantActive.delete(b.id); return b.value;
   }
-  function constantExpression(e: ModelExpr): boolean { return e.kind === "literal" || e.kind === "undefined" || e.kind === "constant" || e.kind === "cast" && constantExpression(e.value) || e.kind === "unary" && constantExpression(e.operand) || e.kind === "binary" && constantExpression(e.left) && constantExpression(e.right) || e.kind === "struct" && e.fields.every(x => constantExpression(x.value)) || e.kind === "array" && e.items.every(constantExpression) || e.kind === "builtin" && (["fill", "embedBytes"].includes(e.name) || numericNames.has(e.name)) && e.args.every(constantExpression) || e.kind === "local" && current.params.some(p => p.id === e.id); }
+  /**
+   * Whether a value is built from literals and constants only. `bound` holds the
+   * temporaries of an enclosing sequence, such as the operands of `fill(4 * W * H, 0)`
+   * bound before the call, which count as constant when their initializers do.
+   */
+  function constantExpression(e: ModelExpr, bound: ReadonlySet<number> = new Set()): boolean {
+    const constant = (value: ModelExpr) => constantExpression(value, bound);
+    if (e.kind === "sequence") {
+      const inner = new Set(bound);
+      for (const stmt of e.body.stmts) {
+        if (stmt.kind !== "let" || !constantExpression(stmt.init, inner)) return false;
+        inner.add(stmt.binder.id);
+      }
+      return constantExpression(e.value, inner);
+    }
+    return e.kind === "literal" || e.kind === "undefined" || e.kind === "constant" || (e.kind === "cast" || e.kind === "copy") && constant(e.value) || e.kind === "unary" && constant(e.operand) || e.kind === "binary" && constant(e.left) && constant(e.right) || e.kind === "struct" && e.fields.every(x => constant(x.value)) || e.kind === "array" && e.items.every(constant) || e.kind === "builtin" && (["fill", "embedBytes"].includes(e.name) || numericNames.has(e.name)) && e.args.every(constant) || e.kind === "local" && (bound.has(e.id) || current.params.some(p => p.id === e.id));
+  }
   /** Array constants of scalars are stored once as statics instead of being inlined at each use. */
   function staticConstant(value: ModelExpr): boolean {
     if (value.type.kind !== "array" || !primitive(value.type.element) || value.type.element.kind === "string") return false;
