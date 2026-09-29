@@ -86,6 +86,8 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
   const bindings = new Map<ts.Symbol, Binding>(), imports = new Map<ts.Symbol, Imported>(), aliases = new Map<string, ts.TypeNode>();
   const declarations = new Map<ModelModule, readonly ts.Statement[]>(), moduleByFile = new Map<string, ModelModule>(), constantActive = new Set<number>();
   const joinTypes = new Map<string, string>();
+  /** Host accessor names of exported state fields, with the file that declares each. */
+  const hostNames = new Map<string, string>();
   let nextId = 1, current!: ModelModule, currentFunction: ModelFunction | undefined, callbackReturnType: AotType | undefined, effectDepth = 0, generated = 0;
   /** Enclosing loops and switch statements, innermost last, for break and continue. */
   const flow: { kind: "loop" | "switch"; id: number }[] = [], targeted = new Set<number>();
@@ -213,7 +215,7 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
   }
   /** Array constants of scalars are stored once as statics instead of being inlined at each use. */
   function staticConstant(value: ModelExpr): boolean {
-    if (value.type.kind !== "array" || !primitive(value.type.element) || value.type.element.kind === "string") return false;
+    if (value.type.kind !== "array" || !primitive(value.type.element) || scalarBase(value.type.element).kind === "string") return false;
     return value.kind === "array" && value.items.every(item => item.kind === "literal" || item.kind === "unary" && item.operand.kind === "literal") || value.kind === "builtin" && value.name === "embedBytes";
   }
   function read(b: Binding, node: ts.Node): ModelExpr {
@@ -489,9 +491,9 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
     if (node.arguments.length !== arity && !(copies && node.arguments.length === arity + 1)) error(node, `${name} takes ${arity} argument${arity > 1 ? "s" : ""}`);
     const target = owned(place(node.arguments[0]!, into), node.arguments[0]!);
     if (target.type.kind !== "array") error(node.arguments[0]!, `${name} requires an array place`);
-    if (target.type.capacity !== undefined && ["push", "insert"].includes(name)) error(node, `${name} on a Cap array is outside the subset`);
+    if (target.type.capacity !== undefined && ["push", "insert", "removeAt", "truncate"].includes(name)) error(node, `${name} on a Cap array is outside the subset`);
     const element = target.type.element;
-    if (copies && (!primitive(element) || element.kind === "string")) error(node.arguments[0]!, `${name} requires numeric, boolean or enum elements`);
+    if (copies && (!primitive(element) || scalarBase(element).kind === "string")) error(node.arguments[0]!, `${name} requires numeric, boolean or enum elements`);
     const types: Record<MutationName, (AotType | undefined)[]> = { push: [element], pop: [], insert: [I32, element], removeAt: [I32], clear: [], truncate: [I32], fillRange: [I32, I32, element], copyRange: [I32, target.type, I32, I32, element], fillRect: [I32, I32, I32, I32, element], copyRect: [I32, I32, target.type, I32, I32, I32, I32, element] };
     const args = node.arguments.slice(1).map((argument, index) => {
       const value = expr(argument, types[name][index], into);
@@ -713,13 +715,20 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
       into.push({ kind: "forOf", binder, source, body, ...(targeted.has(id) ? { loop: id } : {}), loc: loc(node) }); return;
     }
     if (ts.isForStatement(node)) {
-      // `for (let i = start; i < bound; i++)` evaluates bound once, like Python's range();
+      // `for (let i = start; i < bound; i++)` whose body leaves i alone evaluates bound once;
       // other for loops re-evaluate their condition and run their update after continue.
       const declaration = node.initializer && ts.isVariableDeclarationList(node.initializer) && node.initializer.declarations.length === 1 ? node.initializer.declarations[0]! : undefined;
       const counter = declaration && ts.isIdentifier(declaration.name) && declaration.initializer ? declaration.name.text : undefined;
       const increment = node.incrementor && (ts.isPostfixUnaryExpression(node.incrementor) || ts.isPrefixUnaryExpression(node.incrementor)) && node.incrementor.operator === ts.SyntaxKind.PlusPlusToken ? node.incrementor.operand : undefined;
       const bounded = counter !== undefined && !!node.condition && ts.isBinaryExpression(node.condition) && ["<", "<="].includes(node.condition.operatorToken.getText()) && ts.isIdentifier(node.condition.left) && node.condition.left.text === counter && !!increment && ts.isIdentifier(increment) && increment.text === counter;
-      if (!bounded) { generalFor(node, into); return; }
+      const counterSymbol = bounded ? checker.getSymbolAtLocation(declaration!.name) : undefined;
+      const writesCounter = (n: ts.Node): boolean => {
+        const counterOf = (target: ts.Node) => ts.isIdentifier(target) && checker.getSymbolAtLocation(target) === counterSymbol;
+        if (ts.isBinaryExpression(n) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment && counterOf(n.left)) return true;
+        if ((ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) && (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken) && counterOf(n.operand)) return true;
+        return !!ts.forEachChild(n, child => writesCounter(child) || undefined);
+      };
+      if (!bounded || writesCounter(node.statement)) { generalFor(node, into); return; }
       const condition = node.condition as ts.BinaryExpression;
       const start = temp(expr(declaration!.initializer!, type(declaration!.type) ?? I32, into), into), binder = bindLocal(declaration!.name as ts.Identifier, start.type);
       const bound = expr(condition.right, binder.type, into);
@@ -869,7 +878,13 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
           if (mutable && model.kind === "pure") error(d, "pure module cannot declare private state");
           if (mutable && exported(node) && model.kind !== "state") error(d, "private mutable fields cannot be exported");
           const b = register(d.name, { id: nextId++, name: d.name.text, kind: mutable ? "field" : "constant", type: type(d.type, d.name.text) ?? VOID, node: d, declaration: d, module: model, capacity: capacity(d.type) });
-          if (mutable) model.fields.push({ id: b.id, name: b.name, type: b.type, capacity: b.capacity, seed: make(init, { kind: "undefined" }, VOID), loc: loc(d), ...(model.kind === "state" && exported(node) ? { hostName: `${basename(model.file, ".ts").replace(/[^A-Za-z0-9]+/g, "_").toLowerCase()}_${b.name}` } : {}) });
+          const hostName = mutable && model.kind === "state" && exported(node) ? `${basename(model.file, ".ts").replace(/[^A-Za-z0-9]+/g, "_").toLowerCase()}_${b.name}` : undefined;
+          if (hostName !== undefined) {
+            const other = hostNames.get(hostName);
+            if (other !== undefined) error(d.name, `state fields of ${other} and ${model.file} share the host accessor ${hostName}; rename the field or the file`);
+            hostNames.set(hostName, model.file);
+          }
+          if (mutable) model.fields.push({ id: b.id, name: b.name, type: b.type, capacity: b.capacity, seed: make(init, { kind: "undefined" }, VOID), loc: loc(d), ...(hostName !== undefined ? { hostName } : {}) });
         } continue;
       }
       if (ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) && ["createEffect", "watch", "watchEffect"].includes(callName(node.expression.expression) ?? "")) {

@@ -88,8 +88,10 @@ export function __colorText(value: Color | undefined, missing = ""): string {
 
 // Native game subset. Conversions are named after their target type and use
 // Rust `as` semantics: floats truncate toward zero and saturate, integers wrap.
-function integerConversion(value: number, bits: number, signed: boolean): number {
-  if (!Number.isInteger(value)) {
+// usize converts as u32 on every target. Called directly, a conversion treats
+// a value with a fraction as a float; compiled models pass the static type.
+function integerConversion(value: number, bits: number, signed: boolean, float = !Number.isInteger(value)): number {
+  if (float) {
     if (Number.isNaN(value)) return 0;
     const limit = 2 ** (signed ? bits - 1 : bits);
     return Math.min(limit - 1, Math.max(signed ? -limit : 0, Math.trunc(value)));
@@ -97,6 +99,7 @@ function integerConversion(value: number, bits: number, signed: boolean): number
   const wrapped = BigInt.asUintN(bits, BigInt(value));
   return Number(signed ? BigInt.asIntN(bits, wrapped) : wrapped);
 }
+const CONVERSIONS: Record<string, [bits: number, signed: boolean]> = { i8: [8, true], i16: [16, true], i32: [32, true], i64: [64, true], u8: [8, false], u16: [16, false], u32: [32, false], u64: [64, false], usize: [32, false] };
 export function i8(value: number): i8 { return integerConversion(value, 8, true); }
 export function i16(value: number): i16 { return integerConversion(value, 16, true); }
 export function i32(value: number): i32 { return integerConversion(value, 32, true); }
@@ -108,6 +111,13 @@ export function u64(value: number): u64 { return integerConversion(value, 64, fa
 export function usize(value: number): usize { return integerConversion(value, 32, false); }
 export function f32(value: number): f32 { return Math.fround(value); }
 export function f64(value: number): f64 { return value; }
+/** Internal lowering helper: a conversion to `type` of a value whose static type is a float or not. */
+export function __convert(value: number, type: string, float: boolean): number {
+  if (type === "f32") return Math.fround(value);
+  if (type === "f64") return value;
+  const [bits, signed] = CONVERSIONS[type]!;
+  return integerConversion(value, bits, signed, float);
+}
 
 type Float = f32 | f64;
 export function sqrt<T extends Float>(value: T): T { return Math.sqrt(value) as T; }
@@ -135,9 +145,12 @@ export function pop<T>(target: T[]): T { return target.length ? target.pop()! : 
 export function insert<T>(target: T[], index: i32, value: T): void { target.splice(Math.max(0, Math.min(index, target.length)), 0, value); }
 export function removeAt<T>(target: T[], index: i32): T { return index >= 0 && index < target.length ? target.splice(index, 1)[0]! : defaultLike(target[0]); }
 export function clear<T>(target: T[]): void { target.length = 0; }
-export function truncate<T>(target: T[], length: i32): void { if (length >= 0 && length < target.length) target.length = length; }
+/** Keeps the first `length` elements; a negative length keeps none. */
+export function truncate<T>(target: T[], length: i32): void { if (length < target.length) target.length = Math.max(0, length); }
+/** Each element in the window receives its own copy of `value`. */
 export function fillRange<T>(target: T[], start: i32, end: i32, value: T): void {
-  for (let i = Math.max(0, start); i < Math.min(end, target.length); i++) target[i] = value;
+  const own = typeof value === "object" && value !== null;
+  for (let i = Math.max(0, start); i < Math.min(end, target.length); i++) target[i] = own ? structuredClone(value) : value;
 }
 export function copyRange<T>(target: T[], targetStart: i32, source: readonly T[], sourceStart: i32, count: i32, ...skip: [T?]): void {
   let n = count, from = sourceStart, to = targetStart;

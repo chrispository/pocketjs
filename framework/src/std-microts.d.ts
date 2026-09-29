@@ -79,3 +79,4 @@ export declare function __colorBits(value: Color): u32;
 export declare function __colorText(value: Color | undefined, missing?: string): string;
 export declare function __modelNumber(value: number, type: string): number;
 export declare function __modelMultiply(left: number, right: number): number;
+export declare function __convert(value: number, type: string, float: boolean): number;

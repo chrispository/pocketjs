@@ -246,17 +246,11 @@ fn copy_window(target: usize, target_start: i32, source: usize, source_start: i3
     let count = count.min(source as i64 - from).min(target as i64 - to);
     (count > 0).then(|| (to as usize, from as usize, count as usize))
 }
-pub fn copy_range<T: Copy, S: AsRef<[T]> + ?Sized>(target: &mut [T], target_start: i32, source: &S, source_start: i32, count: i32) {
-    let source = source.as_ref();
-    if let Some((to, from, count)) = copy_window(target.len(), target_start, source.len(), source_start, count) {
-        target[to..to + count].copy_from_slice(&source[from..from + count]);
-    }
-}
 /// A row offset of copy_rect or fill_rect; one outside i32 clips to an empty window either way.
 fn row_start(start: i32, row: i32, stride: i32) -> i32 {
     (start as i64 + row as i64 * stride as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
-/// copyRect: row r is copy_range from source_start + r * source_stride to
+/// copyRect: row r is copyRange from source_start + r * source_stride to
 /// target_start + r * target_stride, leaving target elements where the source holds `skip`.
 pub fn copy_rect<T: Copy + PartialEq>(target: &mut [T], target_start: i32, target_stride: i32, source: &[T], source_start: i32, source_stride: i32, width: i32, height: i32, skip: Option<T>) {
     for row in 0..height.max(0) {

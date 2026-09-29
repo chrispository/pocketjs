@@ -101,6 +101,9 @@ class ModelRust {
     while (root.kind === "index" || root.kind === "member" && root.object.type.kind === "named" && this.declarations.get(root.object.type.name)?.kind === "struct") { steps.unshift(root); root = root.object; }
     const place = this.borrow(root);
     if (!place || !steps.length || steps[0]!.kind !== "index") return undefined;
+    // Index operands run before the borrow; one that calls a function could change the
+    // root, which JavaScript reads first, so such reads copy the root instead.
+    if (steps.some(step => step.kind === "index" && this.calls(step.index))) return undefined;
     const statements: RustStatement[] = [];
     let value: RustExpr = place, optional = false;
     const row = steps.length > 1 && steps[1]!.kind === "index" ? this.rows.get(this.rowKey(root, (steps[0] as { index: ModelExpr }).index)) : undefined;
@@ -115,6 +118,14 @@ class ModelRust {
       optional = true;
     }
     return { statements, value };
+  }
+  /** Whether evaluating a value may call a function or change an array. */
+  calls(value: unknown): boolean {
+    if (!value || typeof value !== "object") return false;
+    if (Array.isArray(value)) return value.some(item => this.calls(item));
+    const kind = (value as { kind?: string }).kind;
+    if (kind === "invoke" || kind === "mutate" || kind === "sequence" || kind === "lambda") return true;
+    return Object.entries(value).some(([key, child]) => key !== "loc" && key !== "ledger" && key !== "type" && this.calls(child));
   }
   rowKey(root: ModelExpr, index: ModelExpr): string {
     return `${"id" in root ? root.id : ""}:${JSON.stringify(index, (key, value) => key === "loc" || key === "ledger" ? undefined : value)}`;
@@ -217,12 +228,14 @@ class ModelRust {
       const sameRoot = (value.kind === "local" || value.kind === "field") && value.id === root;
       let stored = value;
       while (stored.kind === "index" || stored.kind === "member") stored = stored.object;
-      const other = (stored.kind === "local" || stored.kind === "field" || stored.kind === "signal") && stored.id !== root;
+      // Any source below the target's root, such as bank.data for a target bank.data, is copied.
+      const aliased = (stored.kind === "local" || stored.kind === "field" || stored.kind === "signal") && stored.id === root;
+      const other = (stored.kind === "local" || stored.kind === "field" || stored.kind === "signal") && !aliased;
       const row = value.kind === "index" && other ? this.rows.get(this.rowKey(value.object, value.index)) : undefined;
       const chain = !place && !row && other ? this.readChain(value) : undefined;
       const within = e.op === "copyRange" && e.args.length < 5 && sameRoot && (e.target.kind === "local" || e.target.kind === "field");
       if (row) source = rp(row);
-      else if (place && !sameRoot) source = slice(ref(place));
+      else if (place && !aliased) source = slice(ref(place));
       else if (chain) { statements.push(...chain.statements); source = slice({ kind: "match", value: chain.value, arms: [{ pattern: { kind: "variant", path: ["Some"], tuple: [rn("value")] }, body: rp("value") }, { pattern: { kind: "wildcard" }, body: ref({ kind: "array", elements: [] }) }] }); }
       else if (!within) { const name = `source_${this.serial++}`; statements.push(let_(name, this.expr(value))); source = slice(ref(rp(name))); }
     }
@@ -367,6 +380,8 @@ class ModelRust {
   scalarType(type: AotType): AotType { const declaration = type.kind === "named" ? this.declarations.get(type.name) : undefined; return declaration?.kind === "newtype" ? this.scalarType(declaration.base) : type; }
   unwrapScalar(value: RustExpr, type: AotType): RustExpr { const declaration = type.kind === "named" ? this.declarations.get(type.name) : undefined; return declaration?.kind === "newtype" ? this.unwrapScalar(rf(value, 0), declaration.base) : value; }
   wrapScalar(value: RustExpr, type: AotType): RustExpr { const declaration = type.kind === "named" ? this.declarations.get(type.name) : undefined; return declaration?.kind === "newtype" ? rc(rp(type.kind === "named" ? type.name : declaration.name), this.wrapScalar(value, declaration.base)) : value; }
+  /** A reference to a value of `type`, borrowed as its scalar when `type` is a newtype. */
+  scalarRef(reference: RustExpr, type: AotType): RustExpr { return this.scalarType(type) === type ? reference : ref(this.unwrapScalar(reference, type)); }
   displayValue(value: RustExpr, type: AotType): RustExpr { const base = this.scalarType(type); return base.kind === "number" && base.name === "f32" ? cast(this.unwrapScalar(value, type), rt("f64")) : value; }
   own(value: RustExpr, type: AotType) { return this.copy(type) ? value : rm(value, "clone"); }
   type(type: AotType, borrowed = false, capacity?: number): RustType {
@@ -468,8 +483,9 @@ class ModelRust {
         // after copying the element.
         const chain = declaration?.kind === "struct" && e.object.type.kind !== "option" && !this.borrow(e.object) ? this.readChain(e) : undefined;
         if (chain) {
+          // An optional field reads as undefined when the element is missing too.
           const value = rm(chain.value, "cloned");
-          return block(chain.statements, e.type.kind === "option" ? value : rm(value, "unwrap_or_else", { kind: "closure", params: [], body: this.defaultValue(e.type) }));
+          return block(chain.statements, e.type.kind === "option" ? rm(value, "flatten") : rm(value, "unwrap_or_else", { kind: "closure", params: [], body: this.defaultValue(e.type) }));
         }
         const object = declaration?.kind === "struct" && e.object.type.kind !== "option" ? this.borrow(e.object) ?? this.expr(e.object) : this.expr(e.object);
         if (e.object.type.kind === "option") return e.optional
@@ -512,6 +528,10 @@ class ModelRust {
           result = bin("/", cast(scalarLeft, this.type(type)), cast(scalarRight, this.type(type)));
         } else if (e.operator === "%" && type.kind === "number" && !type.name.startsWith("f")) {
           result = rc(rp("microts", "builtins", "imod"), scalarLeft, scalarRight);
+        } else if (["<<", ">>", ">>>"].includes(e.operator) && type.kind === "number" && ["i8", "u8", "i16", "u16"].includes(type.name)) {
+          // 8- and 16-bit integers shift as 32-bit values, as in JavaScript, then wrap to their width.
+          const wide = e.operator === ">>>" ? cast(cast(scalarLeft, rt(type.name.replace("i", "u"))), rt("u32")) : cast(scalarLeft, rt("i32"));
+          result = cast(rm(wide, e.operator === "<<" ? "wrapping_shl" : "wrapping_shr", cast(scalarRight, rt("u32"))), rt(type.name));
         } else if (e.operator === ">>>" && type.kind === "number" && !type.name.startsWith("f")) {
           const unsigned = ({ i8: "u8", i16: "u16", i32: "u32", i64: "u64" } as Record<string, string>)[type.name] ?? type.name;
           result = cast(rm(cast(scalarLeft, rt(unsigned)), "wrapping_shr", cast(scalarRight, rt("u32"))), rt(type.name));
@@ -534,7 +554,9 @@ class ModelRust {
         const variant = e.variant ?? (tag?.kind === "literal" ? String(tag.value) : undefined);
         if (declaration?.kind === "union" && !variant) throw new Error(`Union value ${e.name} requires a known discriminant`);
         const fields = declaration?.kind === "struct" ? declaration.fields : declaration?.kind === "union" ? declaration.variants.find(item => item.name === variant)?.fields : undefined;
-        return { kind: "struct", path: variant ? [e.name, rustVariant(variant)] : [e.name], fields: e.fields.filter(field => field.name !== discriminant).map(field => ({ name: field.name, value: this.coerce(field.value, fields?.find(item => item.name === field.name)?.type ?? field.value.type, field.name) })) };
+        // Optional fields a literal leaves out are None.
+        const given = new Set(e.fields.map(field => field.name)), omitted = (fields ?? []).filter(field => !given.has(field.name) && field.name !== discriminant && field.type.kind === "option");
+        return { kind: "struct", path: variant ? [e.name, rustVariant(variant)] : [e.name], fields: [...e.fields.filter(field => field.name !== discriminant).map(field => ({ name: field.name, value: this.coerce(field.value, fields?.find(item => item.name === field.name)?.type ?? field.value.type, field.name) })), ...omitted.map(field => ({ name: field.name, value: rp("None") }))] };
       }
       case "array": return e.type.kind === "array" && e.type.length !== undefined ? { kind: "array", elements: e.items.map(item => this.expr(item)) } : capacity !== undefined ? rc({ kind: "path", path: ["microts", "model", "bounded_array"], typeArgs: [this.type(e.element), { kind: "const", value: capacity }] }, { kind: "array", elements: e.items.map(item => this.expr(item)) }, rl(capacityName)) : { kind: "macro", name: ["alloc", "vec"], args: e.items.map(item => this.expr(item)) };
       case "invoke": return this.invoke(e.callee, e.args);
@@ -568,18 +590,21 @@ class ModelRust {
       return block([let_(name, rc({ kind: "qualifiedPath", type: this.type({ kind: "string" }, false, capacity), member: "new" }), true), re(rc(rp("microts", "model", "append_bounded_display"), ref(rp(name), true), ref(value), rl(capacityName)))], rp(name));
     }
     if (e.name === "len") {
-      const place = this.borrow(e.args[0]!), chain = place ? undefined : this.readChain(e.args[0]!);
-      // An element is measured in place rather than cloned first.
-      if (chain) return block(chain.statements, rm(rm(chain.value, "map", { kind: "closure", params: [rn("value")], body: rc(rp("microts", "builtins", "len"), rp("value")) }), "unwrap_or", rl(0, "i32")));
-      return rc(rp("microts", "builtins", "len"), ref(place ?? args[0]!));
+      const place = this.borrow(e.args[0]!), chain = place ? undefined : this.readChain(e.args[0]!), type = e.args[0]!.type;
+      // An element is measured in place rather than cloned first; a string newtype by its string.
+      if (chain) return block(chain.statements, rm(rm(chain.value, "map", { kind: "closure", params: [rn("value")], body: rc(rp("microts", "builtins", "len"), this.scalarRef(rp("value"), type)) }), "unwrap_or", rl(0, "i32")));
+      return rc(rp("microts", "builtins", "len"), ref(this.unwrapScalar(place ?? args[0]!, type)));
     }
+    // usize converts as u32 on every target, as the JavaScript backends do.
+    if (e.name === "usize") return cast(cast(this.unwrapScalar(args[0]!, e.args[0]!.type), rt("u32")), rt("usize"));
     if ((MICROTS_NUMERIC_TYPES as readonly string[]).includes(e.name)) return cast(this.unwrapScalar(args[0]!, e.args[0]!.type), rt(e.name));
+    if (e.name === "fill") return rc(rp("microts", "builtins", "fill"), args[0]!, args[1]!);
     if (e.name === "embedBytes") return rm({ kind: "macro", name: ["include_bytes"], args: [this.embeddedPath(e)] }, "to_vec");
     if (e.name === "codePoints") {
       // The string is read in place, like len()'s argument.
-      const place = this.borrow(e.args[0]!), chain = place ? undefined : this.readChain(e.args[0]!);
-      if (chain) return block(chain.statements, rm(rm(chain.value, "map", { kind: "closure", params: [rn("value")], body: rc(rp("microts", "builtins", "code_points"), rp("value")) }), "unwrap_or_default"));
-      return rc(rp("microts", "builtins", "code_points"), ref(place ?? args[0]!));
+      const place = this.borrow(e.args[0]!), chain = place ? undefined : this.readChain(e.args[0]!), type = e.args[0]!.type;
+      if (chain) return block(chain.statements, rm(rm(chain.value, "map", { kind: "closure", params: [rn("value")], body: rc(rp("microts", "builtins", "code_points"), this.scalarRef(rp("value"), type)) }), "unwrap_or_default"));
+      return rc(rp("microts", "builtins", "code_points"), ref(this.unwrapScalar(place ?? args[0]!, type)));
     }
     if (e.name === "fromCodePoint") return rc(rp("microts", "builtins", "from_code_point"), args[0]!);
     if (["map", "filter", "find", "some"].includes(e.name)) {

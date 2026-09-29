@@ -81,7 +81,11 @@ export function lowerModelTasks(program: ModelProgram): ModelProgram {
       const uses: Set<number>[] = [], defs: Set<number>[] = [];
       for (const s of lowered) {
         const use = new Set<number>(), def = new Set<number>();
-        const exprUses = (value: unknown) => objects(value, n => { if (n.kind === "local" && !def.has(n.id)) use.add(n.id); });
+        // Element and member targets name their owner by id: a write through one uses the owner.
+        const exprUses = (value: unknown) => objects(value, n => {
+          if (n.kind === "local" && !def.has(n.id)) use.add(n.id);
+          if ((n.kind === "assign" || n.kind === "mutate") && (n.target?.kind === "element" || n.target?.kind === "member") && !def.has(n.target.owner)) use.add(n.target.owner);
+        });
         for (const stmt of s.body.stmts) {
           if (stmt.kind === "let") { exprUses(stmt.init); def.add(stmt.binder.id); }
           else if (stmt.kind === "assign" && stmt.target.kind === "local") { exprUses(stmt.value); def.add(stmt.target.id); }

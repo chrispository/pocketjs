@@ -272,6 +272,12 @@ export class ModelInterpreter {
     if(type.kind==="named"){const declaration=this.program.types.find(value=>value.name===type.name);return declaration?.kind==="enum"||declaration?.kind==="newtype"&&this.primitiveType(declaration.base);}
     return ["number","boolean","string","undefined","void","style"].includes(type.kind);
   }
+  /** Whether a value of this type is a float (f32 or f64, or a newtype of one). */
+  private float(type: AotType): boolean {
+    const declaration = type.kind === "named" ? this.program.types.find(declaration => declaration.name === type.name) : undefined;
+    if (declaration?.kind === "newtype") return declaration.unit !== "Color" && this.float(declaration.base);
+    return type.kind === "number" && type.name.startsWith("f");
+  }
   numeric(value: Value, type: AotType): Value {
     if(type.kind==="option")return value===undefined?undefined:this.numeric(value,type.value);
     if(type.kind==="named"){
@@ -327,7 +333,7 @@ export class ModelInterpreter {
         switch (expr.operator) {
           case "+": value = left + right; break; case "-": value = left - right; break;
           case "*": value = expr.type.kind === "number" && expr.type.name === "i32" ? Math.imul(left, right) : left * right; break;
-          case "/": value = left / right; break; case "%": value = left % right; break; case "**": value = left ** right; break;
+          case "/": value = left / right; break; case "%": value = right === 0 && !this.float(expr.type) ? 0 : left % right; break; case "**": value = left ** right; break;
           case "===": return left === right; case "!==": return left !== right; case "<": return left < right; case "<=": return left <= right; case ">": return left > right; case ">=": return left >= right;
           case "&": value = left & right; break; case "|": value = left | right; break; case "^": value = left ^ right; break; case "<<": value = left << right; break; case ">>": value = left >> right; break;
           case ">>>": { const bits = expr.type.kind === "number" ? ({ i8: 8, u8: 8, i16: 16, u16: 16 } as Record<string, number>)[expr.type.name] : undefined; value = (bits ? left & (2 ** bits - 1) : left) >>> right; break; }
@@ -336,7 +342,7 @@ export class ModelInterpreter {
         return this.numeric(value, expr.type);
       }
       case "invoke": return this.invoke(expr.callee, expr.args.map(evaluate), region);
-      case "builtin": return this.builtin(expr.name, expr.args.map(evaluate), expr.type);
+      case "builtin": return this.builtin(expr.name, expr.args.map(evaluate), expr.type, expr.args[0] && this.float(expr.args[0].type));
       case "lambda": return (...args: Value[]) => { const inner = new Map(env); expr.params.forEach((b, i) => inner.set(b.id, clone(args[i]))); try { this.block(expr.body, region, inner); } catch (result) { if (result instanceof Returned) return result.value; throw result; } };
       case "sequence": try { this.block(expr.body, region, env); return evaluate(expr.value); } catch (result) { if (result instanceof Returned) return result.value; throw result; }
       case "constant": return clone(evaluate(expr.value));
@@ -351,7 +357,7 @@ export class ModelInterpreter {
           case "insert": target.splice(Math.max(0, Math.min(a, target.length)), 0, clone(b)); return;
           case "removeAt": return Number.isInteger(a) && a >= 0 && a < target.length ? target.splice(a, 1)[0] : missing();
           case "clear": target.length = 0; return;
-          case "truncate": if (a >= 0 && a < target.length) target.length = a; return;
+          case "truncate": if (a < target.length) target.length = Math.max(0, a); return;
           case "fillRange": fillWindow(target, a, b, c); return;
           case "copyRange": copyWindow(target, a, b, c, d, args.slice(4)); return;
           case "fillRect": for (let r = 0; r < args[3]; r++) fillWindow(target, a + r * b, a + r * b + c, args[4]); return;
@@ -383,18 +389,20 @@ export class ModelInterpreter {
     try { this.block(body, region, env); } catch (exit) { if (exit instanceof LoopExit && exit.loop === loop) return exit.kind; throw exit; }
     return undefined;
   }
-  builtin(name: string, args: Value[], type: AotType): Value {
+  /** `float` is whether the first argument's static type is a float; conversions use it as Rust `as` does. */
+  builtin(name: string, args: Value[], type: AotType, float?: boolean): Value {
     const [a, b, c] = args;
     switch (name) {
       case "String": case "display": return String(a); case "Number": return this.numeric(Number(a), type); case "len": return typeof a === "string" ? [...a].length : a.length;
       case "copy": return clone(a); case "equals": return this.equal(a, b);
-      case "imod": return ((a % b) + b) % b; case "idiv": return this.numeric(Math.trunc(a / b), type); case "trunc": return this.numeric(Math.trunc(a), type);
+      // Integer division and remainder truncate toward zero; a zero divisor gives 0, as in Rust.
+      case "imod": return b === 0 ? 0 : a % b; case "idiv": return b === 0 ? 0 : this.numeric(Math.trunc(a / b), type); case "trunc": return this.numeric(Math.trunc(a), type);
       case "min": return Math.min(...args); case "max": return Math.max(...args); case "abs": return Math.abs(a); case "floor": return Math.floor(a); case "ceil": return Math.ceil(a); case "round": return Math.round(a); case "sqrt": return Math.sqrt(a); case "sin": return Math.sin(a); case "cos": return Math.cos(a); case "clamp": return Math.min(c, Math.max(b, a));
       case "map": return a.map((v: Value, i: number) => b(clone(v), i)); case "filter": return clone(a.filter((v: Value, i: number) => b(clone(v), i))); case "find": return clone(a.find((v: Value, i: number) => b(clone(v), i))); case "some": return a.some((v: Value, i: number) => b(clone(v), i));
       case "i8": case "i16": case "i32": case "i64": case "u8": case "u16": case "u32": case "u64": case "usize": {
         const bits = name === "usize" ? 32 : Number(name.slice(1)), signed = name.startsWith("i");
         if (Number.isNaN(a)) return 0;
-        if (!Number.isInteger(a)) { const limit = 2 ** (signed ? bits - 1 : bits); return Math.min(limit - 1, Math.max(signed ? -limit : 0, Math.trunc(a))); }
+        if (float ?? !Number.isInteger(a)) { const limit = 2 ** (signed ? bits - 1 : bits); return Math.min(limit - 1, Math.max(signed ? -limit : 0, Math.trunc(a))); }
         const wrapped = BigInt.asUintN(bits, BigInt(a)); return Number(signed ? BigInt.asIntN(bits, wrapped) : wrapped);
       }
       case "f32": return Math.fround(a); case "f64": return a;

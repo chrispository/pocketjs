@@ -3,6 +3,7 @@ import type { ModelAwaitable, ModelBlock, ModelExpr, ModelFunction, ModelModule,
 import { readFileSync } from "node:fs";
 import { checkModelVersion } from "./aot-model-ir.ts";
 import { assertModelProgram } from "./aot-model-tasks.ts";
+import { MICROTS_NUMERIC_TYPES } from "../../contracts/spec/microts.ts";
 
 export interface ModelJsOptions { vue?: boolean; development?: boolean; runtimeImport?: string; stdImport?: string; tasksImport?: string; reservedNames?: string[] }
 export function generateModelJavaScript(program: ModelProgram, module: ModelModule = program.modules[0]!, options: ModelJsOptions = {}): string {
@@ -17,6 +18,7 @@ export function generateModelJavaScript(program: ModelProgram, module: ModelModu
     const declaration = type.kind === "named" && program.types.find(d => d.name === type.name);
     return declaration && declaration.kind === "newtype" ? baseType(declaration.base) : type;
   };
+  const integer = (type: ModelExpr["type"]): boolean => { const base = baseType(type); return base.kind === "number" && !base.name.startsWith("f"); };
   const colorType = (type: ModelExpr["type"]): boolean => type.kind === "named" && program.types.some(d => d.name === type.name && d.kind === "newtype" && d.unit === "Color");
   const publicNames = new Set([...(options.reservedNames ?? []), module.factory, ...module.signals.flatMap(s => [s.name, s.setter]), ...module.memos.map(m => m.name), ...module.functions.map(f => f.name), ...(module.constants ?? []).map(c => c.name), ...module.refs.map(r => r.name), ...program.types.map(t => t.name)]);
   let prefix = "__pocketModel"; while ([...publicNames].some(name => name?.startsWith(prefix))) prefix += "_";
@@ -72,6 +74,8 @@ export function generateModelJavaScript(program: ModelProgram, module: ModelModu
       case "binary": {
         if (e.operator === "*" && e.type.kind === "number" && e.type.name === "i32") return `Math.imul(${expr(e.left)}, ${expr(e.right)})`;
         if (e.operator === ">>>" && e.type.kind === "number" && ["i8", "u8", "i16", "u16"].includes(e.type.name)) return numeric(`((${expr(e.left)} & ${e.type.name.endsWith("8") ? 255 : 65535}) >>> ${expr(e.right)})`, e.type);
+        // An integer remainder by zero is zero, as in Rust.
+        if (e.operator === "%" && integer(e.type)) return numeric(`${stdAlias}.imod(${expr(e.left)}, ${expr(e.right)})`, e.type);
         return numeric(`(${expr(e.left)} ${e.operator} ${expr(e.right)})`, e.type);
       }
       case "conditional": return `(${expr(e.condition)} ? ${expr(e.consequent)} : ${expr(e.alternate)})`;
@@ -81,6 +85,8 @@ export function generateModelJavaScript(program: ModelProgram, module: ModelModu
       case "invoke": return `f${e.callee}(${e.args.map(arg => `${stdAlias}.copy(${expr(arg)})`).join(", ")})`;
       case "builtin":
         if (e.name === "embedBytes") return q([...readFileSync(String((e.args[0] as Extract<ModelExpr, { kind: "literal" }>).value))]);
+        // Conversions follow the argument's static type: a float saturates, an integer wraps.
+        if ((MICROTS_NUMERIC_TYPES as readonly string[]).includes(e.name)) return numeric(`${stdAlias}.__convert(${expr(e.args[0]!)},${q(e.name)},${!integer(e.args[0]!.type)})`, e.type);
         return numeric(`${["String", "Number", "Boolean"].includes(e.name) ? e.name : `${stdAlias}.${e.name}`}(${e.args.map(value => expr(value)).join(", ")})`, e.type);
       case "lambda": {
         const outer = lambdaLocals; lambdaLocals = new Set([...outer, ...e.params.map(p => p.id)]);
@@ -93,8 +99,10 @@ export function generateModelJavaScript(program: ModelProgram, module: ModelModu
       case "constant": return `${stdAlias}.copy(__c${e.id})`;
       case "mutate": {
         const args = e.args.map(value => expr(value)), missing = defaultValue(e.type);
-        const call = e.op === "removeAt" ? `${stdAlias}.removeAt(__t,${args[0]})` : e.op === "pop" ? `(__t.length?__t.pop():${missing})` : `${stdAlias}.${e.op}(__t,${args.map(arg => `${stdAlias}.copy(${arg})`).join(",")})`;
-        return `((__t)=>__t===undefined?${missing}:${call})(${place(e.target, steps(e.target))})`;
+        const call = e.op === "removeAt" ? `((__i)=>__i>=0&&__i<__t.length?__t.splice(__i,1)[0]:${missing})(${args[0]})` : e.op === "pop" ? `(__t.length?__t.pop():${missing})` : `${stdAlias}.${e.op}(__t,${args.map(arg => `${stdAlias}.copy(${arg})`).join(",")})`;
+        // A change below a field reaches guest views through the field revision.
+        const field = e.target.kind === "field" || e.target.kind === "path" && e.target.root.kind === "field";
+        return `((__t)=>{if(__t===undefined)return ${missing};${field ? `const __v=${call};__r.fieldChanged();return __v;` : `return ${call};`}})(${place(e.target, steps(e.target))})`;
       }
     }
   };
@@ -155,7 +163,8 @@ export function generateModelJavaScript(program: ModelProgram, module: ModelModu
       case "set": return `{${s.pre ? `${taskBody ? "" : "const "}${local(s.pre.id)} = __r.read(${s.signal});` : ""}__r.write(${s.signal}, ${expr(s.value, module.signals.find(signal => signal.id === s.signal)?.name)}, ${!!s.writeBack});}`;
       case "if": return `if (${expr(s.condition)}) {${block(s.then)}}${s.else ? ` else {${block(s.else)}}` : ""}`;
       case "for": { const n = `__bound${temporary++}`, start = `__start${temporary++}`; return `{const ${start} = ${s.start ? expr(s.start) : 0};const ${n} = ${expr(s.bound)};${s.loop !== undefined ? `L${s.loop}: ` : ""}for (${taskBody ? "" : "let "}${local(s.binder.id)} = ${start}; ${local(s.binder.id)} ${s.inclusive ? "<=" : "<"} ${n}; ${local(s.binder.id)}++) {${block(s.body)}}}`; }
-      case "forOf": return `${s.loop !== undefined ? `L${s.loop}: ` : ""}for (${taskBody ? "" : "const "}${local(s.binder.id)} of ${expr(s.source)}) {${block(s.body)}}`;
+      // The loop reads a copy of its source, so the body may change the array.
+      case "forOf": return `${s.loop !== undefined ? `L${s.loop}: ` : ""}for (${taskBody ? "" : "const "}${local(s.binder.id)} of ${stdAlias}.copy(${expr(s.source)})) {${block(s.body)}}`;
       case "while": {
         if (s.post) return `L${s.loop}: do {${block(s.body)}} while (${expr(s.condition)});`;
         const labeled = !!s.update && continued.has(s.loop);

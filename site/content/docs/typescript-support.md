@@ -118,7 +118,7 @@ Import numeric types and standard functions from
 | Integer source token such as `1` | Adopts the required type | Infers `i32` without another required type |
 | Fractional/exponent token such as `1.0`, `.5`, `1e3` | Adopts a compatible floating type | Infers `f64`; cannot adopt an integer type |
 | Integer division | `idiv(a, b)` | `idiv(a, b)`; `/` promotes integer operands to `f64` |
-| Integer remainder | `imod(a, b)` | `imod(a, b)`; `%` is rejected |
+| Integer remainder | `imod(a, b)` | `imod(a, b)` or `%`; a remainder by zero is `0` |
 | Float-to-integer conversion | `trunc`, `floor`, `ceil`, `round` | Same functions; a type assertion is not a conversion |
 | Numeric reassignment | Must fit the contract | A local keeps its numeric type for its scope |
 
@@ -243,15 +243,17 @@ registration forms; arbitrary startup calls belong in model methods/hooks.
 
 Every reachable module's top level is checked, including a module imported
 for one constant. A pure helper takes its data through parameters. Another
-model's mutable state is reached through props, events or context, not by
-importing its signals into a model module.
+model's signals are reached through props, events or context, not by importing
+them into a model module. [State modules](#native-game-subset) share
+top-level `let` fields with the modules that import them.
 
 ## Functions and callbacks
 
 **Model functions use named declarations with fixed parameter lists.**
 Each parameter has a simple name and an explicit supported type. Parameter
-destructuring, optional/default/rest parameters, function type parameters and
-generators are not supported. Return types can be inferred from supported
+destructuring, optional and rest parameters, function type parameters and
+generators are not supported; a trailing parameter may default to a literal or
+constant (see the [native game subset](#native-game-subset)). Return types can be inferred from supported
 return statements; annotate public signatures and functions containing
 `switch`, whose return inference is incomplete.
 
@@ -297,17 +299,17 @@ export function increment(): void {
 | Signal setter / Vue `.value = value` | Admitted signal write; computed values are read-only |
 | `if` / `else` | Boolean condition |
 | `return value` | Returns from its enclosing function or admitted callback |
-| `for (let i = start; i < bound; i++)` | The same counter, `<` or `<=`, incremented by `i++` or `++i`; bound evaluated before the loop |
-| `for (const item of xs)` | Array iteration with one simple local binder |
+| `for (let i = start; i < bound; i++)` | The same counter, `<` or `<=`, incremented by `i++` or `++i` and not assigned in the body; bound evaluated before the loop |
+| `for (const item of xs)` | Array iteration with one simple local binder, over the array as it was before the first iteration |
 | `switch` | Number/string/enum cases; each case ends with a direct `break` or `return`; put `default` last |
 | `batch(...)`, `untrack(...)` | Declared callback forms; a batch does not create another instant |
 | `console.log(...)` | Displayable arguments; development emits a host log command, release omits the command |
 | Task call, `await`, `cancel` | Rules in the task section below |
 
-`while`, `do`, `for-in`, `for await`, loop `break`/`continue`, labels,
-`try`/`catch`/`finally`, `throw` and arbitrary statement forms are unsupported.
-A `for` incrementor such as `i += 1`, `i += 2` or `i--` is not the admitted
-counter-loop form. Switch cases cannot fall through; current lowering does
+`for-in`, `for await`, labels, `try`/`catch`/`finally`, `throw` and arbitrary
+statement forms are unsupported. Synchronous functions also admit `while`,
+`do`, `break`, `continue` and other `for` loops; see the
+[native game subset](#native-game-subset). Switch cases cannot fall through; current lowering does
 not enforce enum exhaustiveness or duplicate-case diagnostics.
 
 ```ts
@@ -394,22 +396,23 @@ Model IR to JavaScript, and the reference interpreter executes it.
 
 | Form | Rule |
 |---|---|
-| State modules | A module with top-level `let` fields, or one importing such a module, is a state module. Its fields and functions belong to the root region. Only the root and other state modules import it; factories do not. Exported fields are readable and writable in place by importers, and the native model exposes them as `<module>_<name>()` and `<module>_<name>_mut()` |
+| State modules | A module with top-level `let` fields, or one importing such a module, is a state module. Its fields and functions belong to the root region. Only the root and other state modules import it; factories do not. Exported fields are readable and writable in place by importers, and the native model exposes them as `<module>_<name>()` and `<module>_<name>_mut()`, where `<module>` is the file name; two state modules cannot export fields with the same accessor name |
 | Assignable places | `a[i] = v`, `a[i].x += v`, `s.items[j]++` on locals and fields, including imported state fields. An out-of-range element write is ignored after its operands are evaluated |
-| Loops | `while`, `do`-`while`, `break`, `continue` and `for` loops with any condition and update, in synchronous functions. `for (let i = a; i < b; i++)` keeps its bound-once rule; other `for` loops re-evaluate their condition and run their update after `continue` |
-| Operators | `%` on numbers (an integer remainder by zero is `0`), `~`, and `>>>` in the operand's width |
-| Numeric conversion | `i8()` … `u64()`, `usize()`, `f32()`, `f64()` from the std module, with Rust `as` semantics: floats truncate toward zero and saturate, integers wrap |
+| Loops | `while`, `do`-`while`, `break`, `continue` and `for` loops with any condition and update, in synchronous functions. `for (let i = a; i < b; i++)` whose body does not assign `i` keeps its bound-once rule; other `for` loops re-evaluate their condition and run their update after `continue` |
+| Operators | `%` on numbers (an integer remainder by zero is `0`), `~` and `>>>`. Shifts of 8- and 16-bit integers run on 32-bit values, as in JavaScript, and wrap the result to the operand's width; `>>>` reads the operand as unsigned in its width |
+| Numeric conversion | `i8()` … `u64()`, `usize()`, `f32()`, `f64()` from the std module, with Rust `as` semantics on the argument's static type: a float truncates toward zero and saturates, an integer wraps. `usize()` converts as `u32` on every target |
 | Float math | `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `exp`, `log`, `atan2`, `pow`, `hypot` on `f32` or `f64` |
-| Arrays | `fill(n, v)` allocates; `push`, `pop`, `insert`, `removeAt`, `clear`, `truncate`, `fillRange`, `copyRange`, `fillRect` and `copyRect` change an assignable array place. `copyRange` takes numeric, boolean or enum elements, clips its window to both arrays and, given a sixth argument, leaves target elements in place where the source holds that value. `fillRect` and `copyRect` do the same for each row of a rectangle in arrays laid out in rows (`start + row * stride`); `copyRect` reads every source row before writing Loops that only read `rows[i][j]` with `i` fixed borrow the row once |
-| Constants | A module constant holding an array literal of scalars is stored once as a static; `embedBytes("./file.bin")` embeds a file as a `u8[]` static |
+| Arrays | `fill(n, v)` allocates; `push`, `pop`, `insert`, `removeAt`, `clear`, `truncate`, `fillRange`, `copyRange`, `fillRect` and `copyRect` change an assignable array place. `copyRange` takes numeric, boolean or enum elements, clips its window to both arrays and, given a sixth argument, leaves target elements in place where the source holds that value. `fillRect` and `copyRect` do the same for each row of a rectangle in arrays laid out in rows (`start + row * stride`); `copyRect` reads every source row before writing. `fillRange` and `fillRect` store a copy of the value in each element, a negative `truncate` length empties the array, and `pop` or `removeAt` outside the array returns the element type's default. `Cap` arrays do not admit `push`, `insert`, `removeAt` or `truncate`. Loops that only read `rows[i][j]` with `i` fixed borrow the row once |
+| Constants | A module constant holding an array literal of numbers, booleans or enums is stored once as a static; `embedBytes("./file.bin")` embeds a file as a `u8[]` static |
 | Strings | `codePoints(s)` and `fromCodePoint(n)` |
-| Parameter defaults | `function f(a: i32, b: i32 = -1)`: a call may omit trailing parameters whose defaults are literals or constants |
-| Imports | `tsconfig.json` `paths` next to the entry map non-relative specifiers to local modules |
+| Parameter defaults | `function f(a: i32, b: i32 = -1)`: a call may omit trailing parameters whose defaults are literals or constants. Awaiting an async function passes every argument |
+| Imports | `paths` of the nearest `tsconfig.json` in or above the entry's folder map non-relative specifiers to local modules |
 | Namespaces | `export * as name from "./module"` and `import * as name from "./module"` name a local module; `name.member` reads, assigns or calls its exports, nested namespaces included. Namespaces resolve at compile time and cannot be stored or passed |
 
 Element and member reads of fields, locals and constants, including nested
 arrays such as `rows[i][j]`, index the stored value in place; they do not copy
-the array.
+the array. When an index calls a function, the array is read before the index,
+as in JavaScript.
 
 ## Current implementation limits
 
