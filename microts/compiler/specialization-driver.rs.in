@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 mod gen;
 use gen::*;
 use microts::{Cmd, Host, Input, NodeId, Ready, Ui};
@@ -157,6 +158,8 @@ fn snapshot(ui:&mut Ui, sample:&Value, trace:&Rc<RefCell<Trace>>, pixels:&mut Pi
             "set_style":counters.set_style,"set_prop":counters.set_prop,"set_text":counters.set_text,
             "nodes_created":counters.nodes_created,"nodes_destroyed":counters.nodes_destroyed,
             "structure_rebuilds":core.layout.structure_rebuilds,"shaping_calls":core.layout.shaping_calls,
+            "structure_syncs":core.layout.structure_syncs,"layout_passes":core.layout.layout_passes,
+            "measure_callbacks":core.layout.measure_callbacks,
             "style_updates":core.layout.style_updates,"taffy_nodes":core.layout.taffy_nodes,
             "draw_ops":core.draw.ops,"draw_words":core.draw.words,
             "generated_words":core.draw.generated_words,"region_cache_hits":core.draw.region_cache_hits,

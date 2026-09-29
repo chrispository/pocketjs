@@ -13,7 +13,12 @@ test("sensor-list preserves words, keyed logical identities, focus, hits and com
   const sum = (mode: typeof result.reference, field: string) => mode.frames.reduce((n, frame) => n + (frame.counters[field] ?? 0), 0);
   expect(sum(result.specialized, "memo_evaluations")).toBeLessThan(sum(result.reference, "memo_evaluations"));
   expect(sum(result.specialized, "update_at")).toBeLessThan(sum(result.reference, "update_at"));
-  expect(sum(result.specialized, "shaping_calls")).toBeLessThan(sum(result.reference, "shaping_calls"));
+  // The general solver now retains text measurements across topology edits.
+  // Separate region solvers still rebuild at boundary changes/deoptimization,
+  // so total shaping work no longer has a strict on < off ordering.
+  expect(sum(result.reference, "structure_rebuilds")).toBe(1);
+  expect(result.reference.frames[4]!.counters.shaping_calls).toBe(0);
+  expect(result.reference.frames[9]!.counters.shaping_calls).toBeLessThan(result.reference.frames[0]!.counters.shaping_calls!);
   expect(sum(result.specialized, "generated_words")).toBeLessThan(sum(result.reference, "generated_words"));
   expect(sum(result.specialized, "region_cache_hits")).toBeGreaterThan(0);
   expect(result.specialized.frames[0]!.counters.draw_segments).toBeGreaterThan(0);
