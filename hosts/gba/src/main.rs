@@ -152,16 +152,6 @@ pub unsafe extern "C" fn gba_main() -> ! {
             .iter()
             .find_map(|child| named(ui, *child, name))
     }
-    // Register after generated initialization has checked its asset contract.
-    // This fixed 32x32 boundary uses live layout and needs no baked layout seed.
-    let spinner = named(app.ui(), microts::NodeId::ROOT.0, "Spinner").unwrap();
-    assert!(app
-        .ui_mut()
-        .set_layout_region(spinner, SPINNER_LAYOUT_REGION));
-    assert_eq!(
-        app.ui().core().is_layout_region(spinner.0),
-        SPINNER_LAYOUT_REGION
-    );
     let button = named(app.ui(), microts::NodeId::ROOT.0, "HeroAction").unwrap();
     app.ui_mut().set_focus(button);
     let underline = app.model.underline().get().unwrap();
@@ -205,7 +195,6 @@ pub unsafe extern "C" fn gba_main() -> ! {
         diag(28, app.model.phase() as u32);
         diag(29, (style.width + 0.5) as u32);
         diag(30, color);
-        diag(31, app.ui().core().is_layout_region(spinner.0) as u32);
         // Scan from the bottom so unused gaps inside stack frames cannot
         // hide deeper writes. The watermark survives returns from functions.
         if diagnostic(3) & 31 == 0 {

@@ -20,7 +20,7 @@ export default function App() {
       </View>
       <Text class="absolute left-[8] top-[44] text-xs text-blue-600">ONE RUST CORE / ONE TSX APP</Text>
       <Text class="absolute left-[8] top-[59] text-xl font-bold text-slate-950">JSX on GBA.</Text>
-      <View debugName="Spinner" class="absolute left-[200] top-[58] w-[32] h-[32] shrink-0">
+      <View debugName="Spinner" class="absolute left-[200] top-[58] w-[32] h-[32]">
         <Show when={phase() === 0}><Image class="w-[32] h-[32]" src="spinner-00.svg" /></Show>
         <Show when={phase() === 1}><Image class="w-[32] h-[32]" src="spinner-01.svg" /></Show>
         <Show when={phase() === 2}><Image class="w-[32] h-[32]" src="spinner-02.svg" /></Show>
