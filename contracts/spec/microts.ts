@@ -66,6 +66,36 @@ export const MICROTS_BUILTINS = {
 } as const;
 export type MicroTsBuiltin = keyof typeof MICROTS_BUILTINS;
 
+/**
+ * Built-ins of the native game subset: numeric conversions named after their
+ * target type, float math, in-place array operations whose first argument is
+ * an assignable place, code points and embedded binary constants.
+ */
+export const MICROTS_MATH_BUILTINS = ["sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "exp", "log"] as const;
+export const MICROTS_MATH2_BUILTINS = ["atan2", "pow", "hypot"] as const;
+export const MICROTS_MUTATION_BUILTINS = ["push", "pop", "insert", "removeAt", "clear", "truncate", "fillRange", "copyRange"] as const;
+export const MICROTS_EXTENDED_BUILTINS: Record<string, string> = {
+  ...Object.fromEntries(MICROTS_NUMERIC_TYPES.map(name => [name, `export declare function ${name}(value: number): N.${name};`])),
+  ...Object.fromEntries(MICROTS_MATH_BUILTINS.map(name => [name, `export declare function ${name}<T extends N.f32 | N.f64>(value: T): T;`])),
+  ...Object.fromEntries(MICROTS_MATH2_BUILTINS.map(name => [name, `export declare function ${name}<T extends N.f32 | N.f64>(value: T, other: NoInfer<T> | MicroTsPlainNumber): T;`])),
+  fill: "export declare function fill<T>(count: N.i32, value: T): T[];",
+  push: "export declare function push<T>(target: T[], value: T): void;",
+  pop: "export declare function pop<T>(target: T[]): T;",
+  insert: "export declare function insert<T>(target: T[], index: N.i32, value: T): void;",
+  removeAt: "export declare function removeAt<T>(target: T[], index: N.i32): T;",
+  clear: "export declare function clear<T>(target: T[]): void;",
+  truncate: "export declare function truncate<T>(target: T[], length: N.i32): void;",
+  fillRange: "export declare function fillRange<T>(target: T[], start: N.i32, end: N.i32, value: T): void;",
+  copyRange: "export declare function copyRange<T>(target: T[], targetStart: N.i32, source: readonly T[], sourceStart: N.i32, count: N.i32): void;",
+  codePoints: "export declare function codePoints(value: string): N.i32[];",
+  fromCodePoint: "export declare function fromCodePoint(code: N.i32): string;",
+  embedBytes: "export declare function embedBytes(path: string): N.u8[];",
+};
+/** Numeric aliases are declared by name so conversion functions can share them. */
+export function microTsTypeAliases(): string[] {
+  return [...MICROTS_NUMERIC_TYPES, ...Object.keys(MICROTS_UNIT_TYPES)].map(name => `export type ${name} = N.${name};`);
+}
+
 const generated = "// GENERATED — do not edit; run `bun contracts/spec/gen-rust.ts`.\n";
 
 export function generateMicroTsNumericTypes(): string {
@@ -77,7 +107,7 @@ export function generateMicroTsNumericTypes(): string {
 }
 
 export function generateMicroTsStdDeclarations(): string {
-  const lines = [generated.trimEnd(), 'export type * from "./numeric-microts.ts";',
+  const lines = [generated.trimEnd(), 'import type * as N from "./numeric-microts.ts";', ...microTsTypeAliases(),
     'export type StyleClass = string & { readonly __style?: true };',
     'export type Cap<T extends string | readonly unknown[], N extends number> = T & { readonly __capacity?: N };',
     'export { copy, equals } from "./model-reactive.ts";',
@@ -87,7 +117,6 @@ export function generateMicroTsStdDeclarations(): string {
     'export declare function filter<T>(value: readonly T[], fn: (value: T, index: i32) => boolean): T[];',
     'export declare function find<T>(value: readonly T[], fn: (value: T, index: i32) => boolean): T | undefined;',
     'export declare function some<T>(value: readonly T[], fn: (value: T, index: i32) => boolean): boolean;',
-    'import type { i32, f32, f64, Color, u32 } from "./numeric-microts.ts";',
     'export type MicroTsPlainNumber = number & { readonly __type?: never; readonly __newtype?: never };',
     'export type MicroTsNumericResult<T extends number> = T extends MicroTsPlainNumber ? number : T;'];
   for (const [name, spec] of Object.entries(MICROTS_BUILTINS)) {
@@ -99,6 +128,7 @@ export function generateMicroTsStdDeclarations(): string {
       lines.push(`export declare function ${name}<T extends number>(${args.join(", ")}): MicroTsNumericResult<T>;`);
     }
   }
+  lines.push(...Object.values(MICROTS_EXTENDED_BUILTINS));
   lines.push("export declare function __colorBits(value: Color): u32;", "export declare function __colorText(value: Color | undefined, missing?: string): string;");
   lines.push("export declare function __modelNumber(value: number, type: string): number;", "export declare function __modelMultiply(left: number, right: number): number;");
   return lines.join("\n") + "\n";
@@ -132,7 +162,7 @@ export function generateMicroTsComponentTypes(): string {
 export function generateMicroTsRust(): string {
   const lines = [generated.trimEnd(), "pub use pocketjs_core::spec::{btn, prop, Display, NodeType};", "",
     `pub const NUMERIC_TYPES: &[&str] = &[${MICROTS_NUMERIC_TYPES.map((name) => JSON.stringify(name)).join(", ")}];`,
-    `pub const BUILTINS: &[&str] = &[${Object.keys(MICROTS_BUILTINS).map((name) => JSON.stringify(name)).join(", ")}];`,
+    `pub const BUILTINS: &[&str] = &[${[...Object.keys(MICROTS_BUILTINS), ...Object.keys(MICROTS_EXTENDED_BUILTINS)].map((name) => JSON.stringify(name)).join(", ")}];`,
     "pub const HOST_ELEMENTS: &[(&str, u8)] = &["];
   for (const [name, spec] of Object.entries(MICROTS_ELEMENTS)) lines.push(`    (${JSON.stringify(name)}, ${spec.nodeType}),`);
   lines.push("];", "pub const STYLE_PROPS: &[(&str, u8, &str)] = &[");

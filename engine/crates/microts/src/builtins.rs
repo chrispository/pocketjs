@@ -154,3 +154,112 @@ pub fn fixed<T: Float>(value: T, digits: i32) -> String {
         .format_to_fixed(value.as_f64(), digits as u8)
         .to_string()
 }
+
+// Native game subset: float math, in-place array operations and code points.
+// Array operations clamp their ranges; an out-of-range element is left alone,
+// matching element writes.
+
+pub trait Math: Copy {
+    fn sqrt(self) -> Self;
+    fn sin(self) -> Self;
+    fn cos(self) -> Self;
+    fn tan(self) -> Self;
+    fn asin(self) -> Self;
+    fn acos(self) -> Self;
+    fn atan(self) -> Self;
+    fn exp(self) -> Self;
+    fn log(self) -> Self;
+    fn atan2(self, other: Self) -> Self;
+    fn pow(self, other: Self) -> Self;
+    fn hypot(self, other: Self) -> Self;
+}
+macro_rules! math {
+    ($type:ty, $sqrt:ident, $sin:ident, $cos:ident, $tan:ident, $asin:ident, $acos:ident, $atan:ident, $exp:ident, $log:ident, $atan2:ident, $pow:ident, $hypot:ident) => {
+        impl Math for $type {
+            fn sqrt(self) -> Self { libm::$sqrt(self) }
+            fn sin(self) -> Self { libm::$sin(self) }
+            fn cos(self) -> Self { libm::$cos(self) }
+            fn tan(self) -> Self { libm::$tan(self) }
+            fn asin(self) -> Self { libm::$asin(self) }
+            fn acos(self) -> Self { libm::$acos(self) }
+            fn atan(self) -> Self { libm::$atan(self) }
+            fn exp(self) -> Self { libm::$exp(self) }
+            fn log(self) -> Self { libm::$log(self) }
+            fn atan2(self, other: Self) -> Self { libm::$atan2(self, other) }
+            fn pow(self, other: Self) -> Self { libm::$pow(self, other) }
+            fn hypot(self, other: Self) -> Self { libm::$hypot(self, other) }
+        }
+    };
+}
+math!(f32, sqrtf, sinf, cosf, tanf, asinf, acosf, atanf, expf, logf, atan2f, powf, hypotf);
+math!(f64, sqrt, sin, cos, tan, asin, acos, atan, exp, log, atan2, pow, hypot);
+pub fn sqrt<T: Math>(value: T) -> T { value.sqrt() }
+pub fn sin<T: Math>(value: T) -> T { value.sin() }
+pub fn cos<T: Math>(value: T) -> T { value.cos() }
+pub fn tan<T: Math>(value: T) -> T { value.tan() }
+pub fn asin<T: Math>(value: T) -> T { value.asin() }
+pub fn acos<T: Math>(value: T) -> T { value.acos() }
+pub fn atan<T: Math>(value: T) -> T { value.atan() }
+pub fn exp<T: Math>(value: T) -> T { value.exp() }
+pub fn log<T: Math>(value: T) -> T { value.log() }
+pub fn atan2<T: Math>(value: T, other: T) -> T { value.atan2(other) }
+pub fn pow<T: Math>(value: T, other: T) -> T { value.pow(other) }
+pub fn hypot<T: Math>(value: T, other: T) -> T { value.hypot(other) }
+
+pub fn fill<T: Clone>(count: i32, value: T) -> Vec<T> {
+    alloc::vec![value; count.max(0) as usize]
+}
+pub fn insert<T>(target: &mut Vec<T>, index: i32, value: T) {
+    let index = (index.max(0) as usize).min(target.len());
+    target.insert(index, value);
+}
+pub fn remove_at<T>(target: &mut Vec<T>, index: i32, missing: impl FnOnce() -> T) -> T {
+    if index >= 0 && (index as usize) < target.len() {
+        target.remove(index as usize)
+    } else {
+        missing()
+    }
+}
+pub fn truncate<T>(target: &mut Vec<T>, length: i32) {
+    target.truncate(length.max(0) as usize);
+}
+pub fn fill_range<T: Clone>(target: &mut [T], start: i32, end: i32, value: T) {
+    let start = (start.max(0) as usize).min(target.len());
+    let end = (end.max(0) as usize).min(target.len());
+    if start < end {
+        target[start..end].fill(value);
+    }
+}
+/// Clips a copy of `count` elements to both slices; returns (to, from, count).
+fn copy_window(target: usize, target_start: i32, source: usize, source_start: i32, count: i32) -> Option<(usize, usize, usize)> {
+    let (mut to, mut from, mut count) = (target_start as i64, source_start as i64, count as i64);
+    if from < 0 {
+        count += from;
+        to -= from;
+        from = 0;
+    }
+    if to < 0 {
+        count += to;
+        from -= to;
+        to = 0;
+    }
+    let count = count.min(source as i64 - from).min(target as i64 - to);
+    (count > 0).then(|| (to as usize, from as usize, count as usize))
+}
+pub fn copy_range<T: Copy, S: AsRef<[T]> + ?Sized>(target: &mut [T], target_start: i32, source: &S, source_start: i32, count: i32) {
+    let source = source.as_ref();
+    if let Some((to, from, count)) = copy_window(target.len(), target_start, source.len(), source_start, count) {
+        target[to..to + count].copy_from_slice(&source[from..from + count]);
+    }
+}
+pub fn copy_within<T: Copy>(target: &mut [T], source_start: i32, target_start: i32, count: i32) {
+    if let Some((to, from, count)) = copy_window(target.len(), target_start, target.len(), source_start, count) {
+        target.copy_within(from..from + count, to);
+    }
+}
+pub fn code_points(value: &str) -> Vec<i32> {
+    value.chars().map(|character| character as i32).collect()
+}
+pub fn from_code_point(code: i32) -> String {
+    char::from_u32(code as u32).unwrap_or('\u{fffd}').to_string()
+}

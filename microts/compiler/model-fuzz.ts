@@ -45,7 +45,7 @@ export function generateModelCase(seed: number, options: ModelFuzzOptions = {}):
       `export const [items, setItems] = createSignal<i32[]>([1]); export function press(): void { const view = items(); view[0] = 3; }`,
       `export const [n, setN] = createSignal<i32>(1.0);`,
       `export async function first(): Promise<void> { second(); await frames(1); } export async function second(): Promise<void> { first(); await frames(1); }`,
-      `export function press(): void { while (true) {} }`,
+      `export async function press(): Promise<void> { while (true) {} }`,
     ];
     const index = (seed >>> 0) % violations.length;
     return { seed, entry, sources: new Map([[entry, imports + violations[index]]]), tape: [], coverage: [`diagnostic:${MODEL_FUZZ_DIAGNOSTICS[index]}`], diagnostic: MODEL_FUZZ_DIAGNOSTICS[index] };

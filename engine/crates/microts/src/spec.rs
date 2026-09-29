@@ -2,7 +2,7 @@
 pub use pocketjs_core::spec::{btn, prop, Display, NodeType};
 
 pub const NUMERIC_TYPES: &[&str] = &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "f32", "f64"];
-pub const BUILTINS: &[&str] = &["len", "trunc", "floor", "ceil", "round", "idiv", "imod", "min", "max", "abs", "clamp", "fixed"];
+pub const BUILTINS: &[&str] = &["len", "trunc", "floor", "ceil", "round", "idiv", "imod", "min", "max", "abs", "clamp", "fixed", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "f32", "f64", "sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "exp", "log", "atan2", "pow", "hypot", "fill", "push", "pop", "insert", "removeAt", "clear", "truncate", "fillRange", "copyRange", "codePoints", "fromCodePoint", "embedBytes"];
 pub const HOST_ELEMENTS: &[(&str, u8)] = &[
     ("View", 0),
     ("Text", 1),

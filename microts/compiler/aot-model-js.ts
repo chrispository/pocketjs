@@ -1,5 +1,6 @@
 /** Executable JS lowering of the Model IR. No interpreter or Promise runs in this class. */
-import type { ModelAwaitable, ModelBlock, ModelExpr, ModelFunction, ModelModule, ModelProgram, ModelStmt } from "./aot-model-ir.ts";
+import type { ModelAwaitable, ModelBlock, ModelExpr, ModelFunction, ModelModule, ModelPathStep, ModelProgram, ModelStmt, ModelTarget } from "./aot-model-ir.ts";
+import { readFileSync } from "node:fs";
 import { checkModelVersion } from "./aot-model-ir.ts";
 import { assertModelProgram } from "./aot-model-tasks.ts";
 
@@ -27,6 +28,25 @@ export function generateModelJavaScript(program: ModelProgram, module: ModelModu
   let lambdaLocals = new Set<number>();
   const local = (id: number) => taskBody && !lambdaLocals.has(id) ? `__locals[${id}]` : `v${id}`;
   let capacityContext = "value";
+  const constants = new Map<number, ModelExpr>(), continued = new Set<number>();
+  const collect = (value: unknown): void => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) { value.forEach(collect); return; }
+    const node = value as { kind?: string; id?: number; loop?: number; value?: ModelExpr };
+    if (node.kind === "constant" && node.id !== undefined && node.value) constants.set(node.id, node.value);
+    if (node.kind === "continue" && node.loop !== undefined) continued.add(node.loop);
+    for (const [key, child] of Object.entries(value)) if (!["loc", "ledger", "type"].includes(key)) collect(child);
+  };
+  collect(program.modules);
+  const bodyLabels = new Set<number>();
+  /** Reads a place without copying; undefined when an index is out of range. */
+  const place = (target: ModelTarget, steps: ModelPathStep[]): string => {
+    const root = target.kind === "path" ? target.root : target.kind === "element" || target.kind === "member" ? { kind: "local" as const, id: target.owner } : { kind: target.kind, id: target.id };
+    let value = root.kind === "field" ? `__fields[${root.id}]` : local(root.id);
+    for (const step of steps) value = step.kind === "member" ? `(${value})?.[${q(step.name)}]` : `((a,i)=>a!==undefined&&Number.isInteger(i)&&i>=0&&i<a.length?a[i]:undefined)(${value},${expr(step.index)})`;
+    return value;
+  };
+  const steps = (target: ModelTarget): ModelPathStep[] => target.kind === "path" ? target.steps : target.kind === "element" ? [{ kind: "index", index: target.index }] : target.kind === "member" ? [{ kind: "member", name: target.name }] : [];
   const expr = (e: ModelExpr, context?: string): string => {
     const before = capacityContext; if (context) capacityContext = context;
     try {
@@ -51,6 +71,7 @@ export function generateModelJavaScript(program: ModelProgram, module: ModelModu
       case "unary": return numeric(`(${e.operator}${expr(e.operand)})`, e.type);
       case "binary": {
         if (e.operator === "*" && e.type.kind === "number" && e.type.name === "i32") return `Math.imul(${expr(e.left)}, ${expr(e.right)})`;
+        if (e.operator === ">>>" && e.type.kind === "number" && ["i8", "u8", "i16", "u16"].includes(e.type.name)) return numeric(`((${expr(e.left)} & ${e.type.name.endsWith("8") ? 255 : 65535}) >>> ${expr(e.right)})`, e.type);
         return numeric(`(${expr(e.left)} ${e.operator} ${expr(e.right)})`, e.type);
       }
       case "conditional": return `(${expr(e.condition)} ? ${expr(e.consequent)} : ${expr(e.alternate)})`;
@@ -58,7 +79,9 @@ export function generateModelJavaScript(program: ModelProgram, module: ModelModu
       case "struct": return `({${e.fields.map(field => `${q(field.name)}: ${expr(field.value)}`).join(", ")}})`;
       case "array": return `[${e.items.map(value => expr(value)).join(", ")}]`;
       case "invoke": return `f${e.callee}(${e.args.map(arg => `${stdAlias}.copy(${expr(arg)})`).join(", ")})`;
-      case "builtin": return numeric(`${["String", "Number", "Boolean"].includes(e.name) ? e.name : `${stdAlias}.${e.name}`}(${e.args.map(value => expr(value)).join(", ")})`, e.type);
+      case "builtin":
+        if (e.name === "embedBytes") return q([...readFileSync(String((e.args[0] as Extract<ModelExpr, { kind: "literal" }>).value))]);
+        return numeric(`${["String", "Number", "Boolean"].includes(e.name) ? e.name : `${stdAlias}.${e.name}`}(${e.args.map(value => expr(value)).join(", ")})`, e.type);
       case "lambda": {
         const outer = lambdaLocals; lambdaLocals = new Set([...outer, ...e.params.map(p => p.id)]);
         const collect = (value: any): void => { if (!value || typeof value !== "object") return; if (value.binder) lambdaLocals.add(value.binder.id); for (const [key, child] of Object.entries(value)) if (!["loc", "type", "ledger"].includes(key)) { if (Array.isArray(child)) child.forEach(collect); else collect(child); } };
@@ -67,6 +90,12 @@ export function generateModelJavaScript(program: ModelProgram, module: ModelModu
         lambdaDepth--; lambdaLocals = outer; return value;
       }
       case "sequence": return `(() => {${block(e.body)}return ${expr(e.value)};})()`;
+      case "constant": return `${stdAlias}.copy(__c${e.id})`;
+      case "mutate": {
+        const args = e.args.map(value => expr(value)), missing = defaultValue(e.type);
+        const call = e.op === "removeAt" ? `${stdAlias}.removeAt(__t,${args[0]})` : e.op === "pop" ? `(__t.length?__t.pop():${missing})` : `${stdAlias}.${e.op}(__t,${args.map(arg => `${stdAlias}.copy(${arg})`).join(",")})`;
+        return `((__t)=>__t===undefined?${missing}:${call})(${place(e.target, steps(e.target))})`;
+      }
     }
   };
   function defaultValue(type: ModelExpr["type"]): string {
@@ -117,12 +146,24 @@ export function generateModelJavaScript(program: ModelProgram, module: ModelModu
         const target = s.target;
         if (target.kind === "field") return `__fields[${target.id}] = ${stdAlias}.copy(${expr(s.value)});__r.fieldChanged();`;
         if (target.kind === "element") return `{const __index=${expr(target.index)};const __value=${stdAlias}.copy(${expr(s.value)});if(Number.isInteger(__index)&&__index>=0&&__index<${local(target.owner)}.length)${local(target.owner)}[__index]=__value;}`;
+        if (target.kind === "path") {
+          const last = target.steps.at(-1)!;
+          return `{const __owner=${place(target, target.steps.slice(0, -1))};${last.kind === "index" ? `const __index=${expr(last.index)};` : ""}const __value=${stdAlias}.copy(${expr(s.value)});${last.kind === "member" ? `if(__owner!==undefined)__owner[${q(last.name)}]=__value;` : "if(__owner!==undefined&&Number.isInteger(__index)&&__index>=0&&__index<__owner.length)__owner[__index]=__value;"}${target.root.kind === "field" ? "__r.fieldChanged();" : ""}}`;
+        }
         return `${"id" in target ? target.kind === "local" ? local(target.id) : `__fields[${target.id}]` : `${local(target.owner)}[${q(target.name)}]`} = ${stdAlias}.copy(${expr(s.value)});`;
       }
       case "set": return `{${s.pre ? `${taskBody ? "" : "const "}${local(s.pre.id)} = __r.read(${s.signal});` : ""}__r.write(${s.signal}, ${expr(s.value, module.signals.find(signal => signal.id === s.signal)?.name)}, ${!!s.writeBack});}`;
       case "if": return `if (${expr(s.condition)}) {${block(s.then)}}${s.else ? ` else {${block(s.else)}}` : ""}`;
-      case "for": { const n = `__bound${temporary++}`, start = `__start${temporary++}`; return `{const ${start} = ${s.start ? expr(s.start) : 0};const ${n} = ${expr(s.bound)};for (${taskBody ? "" : "let "}${local(s.binder.id)} = ${start}; ${local(s.binder.id)} ${s.inclusive ? "<=" : "<"} ${n}; ${local(s.binder.id)}++) {${block(s.body)}}}`; }
-      case "forOf": return `for (${taskBody ? "" : "const "}${local(s.binder.id)} of ${expr(s.source)}) {${block(s.body)}}`;
+      case "for": { const n = `__bound${temporary++}`, start = `__start${temporary++}`; return `{const ${start} = ${s.start ? expr(s.start) : 0};const ${n} = ${expr(s.bound)};${s.loop !== undefined ? `L${s.loop}: ` : ""}for (${taskBody ? "" : "let "}${local(s.binder.id)} = ${start}; ${local(s.binder.id)} ${s.inclusive ? "<=" : "<"} ${n}; ${local(s.binder.id)}++) {${block(s.body)}}}`; }
+      case "forOf": return `${s.loop !== undefined ? `L${s.loop}: ` : ""}for (${taskBody ? "" : "const "}${local(s.binder.id)} of ${expr(s.source)}) {${block(s.body)}}`;
+      case "while": {
+        if (s.post) return `L${s.loop}: do {${block(s.body)}} while (${expr(s.condition)});`;
+        const labeled = !!s.update && continued.has(s.loop);
+        if (labeled) bodyLabels.add(s.loop);
+        return `L${s.loop}: while (${expr(s.condition)}) {${labeled ? `B${s.loop}: {${block(s.body)}}` : block(s.body)}${s.update ? block(s.update) : ""}}`;
+      }
+      case "break": return `break L${s.loop};`;
+      case "continue": return bodyLabels.has(s.loop) ? `break B${s.loop};` : `continue L${s.loop};`;
       case "switch": return `switch (${expr(s.value)}) {${s.cases.map(c => `${c.value ? `case ${expr(c.value)}` : "default"}: {${block(c.body)}break;}`).join("\n")}}`;
       case "return": return taskBody && !lambdaDepth ? `return {done:true,result:${s.value ? expr(s.value) : "undefined"}};` : `return ${s.value ? `${stdAlias}.copy(${expr(s.value)})` : ""};`;
       case "call": case "start": return `f${s.kind === "call" ? s.callee : s.task}(${s.args.map(arg => `${stdAlias}.copy(${expr(arg)})`).join(",")});`;
@@ -154,6 +195,7 @@ export function generateModelJavaScript(program: ModelProgram, module: ModelModu
   const setup = [
     `const __r = ${regionAlias}(${options.development !== false}, ${program.recursionLimit ?? 256});`,
     `const __tasks = new ${tasksAlias}(__r); const __fields = {};`,
+    ...[...constants].map(([id, value]) => `const __c${id} = ${expr(value)};`),
     ...module.fields.map(field => `__fields[${field.id}] = ${expr(field.seed, field.name)};__r.fields.set(${q(field.name)},()=>__fields[${field.id}]);`),
     ...module.refs.map(ref => `__r.refs.set(${q(ref.name)},${refAlias}());`),
     ...module.signals.map(signal => `__r.signal(${signal.id},${q(signal.name)},${expr(signal.seed, signal.name)},${signal.capacity ?? ("capacity" in signal.type ? signal.type.capacity : undefined) ?? "undefined"},${scalar(signal.type)});`),

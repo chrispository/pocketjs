@@ -1,12 +1,12 @@
 /** Model IR → Rust AST. The shared printer is the only owner of Rust syntax. */
 import type { AotComponent, AotProgram, AotType, AotTypeDeclaration } from "./aot-ir.ts";
-import { checkModelVersion, type ModelBinder, type ModelBlock, type ModelExpr, type ModelFunction, type ModelModule, type ModelProgram, type ModelStmt, type ModelTask, type ModelAwaitable } from "./aot-model-ir.ts";
+import { checkModelVersion, type ModelBinder, type ModelBlock, type ModelExpr, type ModelFunction, type ModelModule, type ModelPathStep, type ModelProgram, type ModelStmt, type ModelTarget, type ModelTask, type ModelAwaitable } from "./aot-model-ir.ts";
 import type { RustBlock, RustExpr, RustField, RustFunction, RustItem, RustParam, RustStatement, RustType } from "./rust-ast.ts";
 import { rb, rc, re, ref, rf, rl, rm, rn, rp, rr, rt } from "./rust-ast.ts";
 import { printRust, rustVariant } from "./rust-printer.ts";
 import { exactIntegerLiteral, typeName } from "./aot-types.ts";
 import { ANIMATABLE, PROP, type PropName } from "../../contracts/spec/spec.ts";
-import { parseMicroTsColor } from "../../contracts/spec/microts.ts";
+import { parseMicroTsColor, MICROTS_NUMERIC_TYPES } from "../../contracts/spec/microts.ts";
 
 const self = rp("self"), unit: RustType = { kind: "tuple", elements: [] };
 const field = (name: string) => rf(self, name);
@@ -36,8 +36,21 @@ class ModelRust {
   modules = new Map<number, ModelModule>();
   functions = new Map<number, ModelFunction>();
   declarations: Map<string, AotTypeDeclaration>;
+  /** Loops targeted by continue, and the label a continue uses while each loop is open. */
+  continued = new Set<number>();
+  loopLabels = new Map<number, { loop: string; body?: string }>();
+  constants = new Map<number, ModelExpr>();
   constructor(readonly program: ModelProgram, readonly view?: AotProgram) {
     this.declarations = new Map(program.types.map(t => [t.name, t]));
+    const walk = (value: unknown): void => {
+      if (!value || typeof value !== "object") return;
+      if (Array.isArray(value)) { value.forEach(walk); return; }
+      const node = value as { kind?: string; loop?: number; id?: number; value?: ModelExpr };
+      if (node.kind === "continue" && node.loop !== undefined) this.continued.add(node.loop);
+      if (node.kind === "constant" && node.id !== undefined && node.value) this.constants.set(node.id, node.value);
+      for (const [key, child] of Object.entries(value)) if (!["loc", "ledger", "type"].includes(key)) walk(child);
+    };
+    walk(program.modules);
     for (const module of program.modules) for (const func of module.functions) { this.modules.set(func.id, module); this.functions.set(func.id, func); }
   }
   name(id: number) { return `v_${id}`; }
@@ -53,6 +66,75 @@ class ModelRust {
     if (this.task?.fields.some(p => p.id === id)) return field(`task_${this.task.id}_${this.name(id)}`);
     if ([...this.current.signals, ...this.current.fields, ...this.current.memos, ...this.current.refs].some(p => p.id === id)) return field(this.name(id));
     return rp(this.name(id));
+  }
+  constantName(id: number) { return `CONST_${id}`; }
+  /** A Rust place for a stored value, read without cloning the whole value. */
+  borrow(e: ModelExpr): RustExpr | undefined {
+    if (e.kind === "local" || e.kind === "field" || e.kind === "signal") return this.storage(e.id);
+    if (e.kind === "constant") return rp(this.constantName(e.id));
+    if (e.kind === "member" && e.object.type.kind === "named" && this.declarations.get(e.object.type.name)?.kind === "struct") {
+      const object = this.borrow(e.object);
+      return object && rf(object, e.name);
+    }
+    return undefined;
+  }
+  /** Type of a place below its root, following element and member steps. */
+  stepType(type: AotType, step: ModelPathStep): AotType {
+    if (step.kind === "index") return type.kind === "array" ? type.element : type;
+    const declaration = type.kind === "named" ? this.declarations.get(type.name) : undefined;
+    return declaration?.kind === "struct" ? declaration.fields.find(field => field.name === step.name)!.type : type;
+  }
+  rootType(id: number): AotType {
+    return (this.binders.get(id) ?? this.task?.fields.find(field => field.id === id) ?? [...this.current.fields, ...this.current.params].find(field => field.id === id))!.type;
+  }
+  /**
+   * Runs `body` with a mutable Rust place for a target. Index operands are bound to
+   * locals first; an out-of-range element skips the body, as element writes do.
+   */
+  withPlace(target: ModelTarget, body: (place: RustExpr, type: AotType) => RustStatement[]): RustStatement[] {
+    const root = target.kind === "path" ? target.root : target.kind === "element" || target.kind === "member" ? { kind: "local" as const, id: target.owner } : { kind: target.kind, id: target.id };
+    const steps: ModelPathStep[] = target.kind === "path" ? target.steps : target.kind === "element" ? [{ kind: "index", index: target.index }] : target.kind === "member" ? [{ kind: "member", name: target.name }] : [];
+    const prefix: RustStatement[] = [], names = steps.map(step => { if (step.kind !== "index") return ""; const name = `index_${this.serial++}`; prefix.push(let_(name, this.expr(step.index))); return name; });
+    const nest = (place: RustExpr, type: AotType, index: number): RustStatement[] => {
+      if (index === steps.length) return body(place, type);
+      const step = steps[index]!, next = this.stepType(type, step);
+      if (step.kind === "member") return nest(rf(place, step.name), next, index + 1);
+      const element = `element_${this.serial++}`;
+      return [re({ kind: "ifLet", pattern: { kind: "variant", path: ["Some"], tuple: [rn(element)] }, value: rm(place, "get_mut", cast(rp(names[index]!), rt("usize"))), then: rb(nest({ kind: "unary", operator: "*", expr: rp(element) }, next, index + 1)) })];
+    };
+    return [...prefix, ...nest(this.storage(root.id), this.rootType(root.id), 0)];
+  }
+  mutate(e: Extract<ModelExpr, { kind: "mutate" }>): RustExpr {
+    const statements: RustStatement[] = [], args = e.args.map((arg, index) => {
+      if (e.op === "copyRange" && index === 1) return undefined;
+      const name = `arg_${this.serial++}`; statements.push(let_(name, this.expr(arg))); return rp(name);
+    });
+    const root = e.target.kind === "path" ? e.target.root.id : "id" in e.target ? e.target.id : e.target.owner;
+    let source: RustExpr | undefined;
+    if (e.op === "copyRange") {
+      const value = e.args[1]!, place = this.borrow(value);
+      const sameRoot = (value.kind === "local" || value.kind === "field") && value.id === root;
+      if (place && !sameRoot) source = ref(place);
+      else if (!(sameRoot && (e.target.kind === "local" || e.target.kind === "field"))) { const name = `source_${this.serial++}`; statements.push(let_(name, this.expr(value))); source = ref(rp(name)); }
+    }
+    const result = `result_${this.serial++}`, returns = e.type.kind !== "void";
+    if (returns) statements.push(let_(result, this.defaultValue(e.type), true, this.type(e.type)));
+    const builtin = (name: string, ...values: RustExpr[]) => rc(rp("microts", "builtins", name), ...values);
+    statements.push(...this.withPlace(e.target, (place, type) => {
+      const element = type.kind === "array" ? type.element : e.type;
+      const coerced = (value: RustExpr | undefined) => value!;
+      switch (e.op) {
+        case "push": return [re(rm(place, "push", coerced(args[0])))];
+        case "pop": return [assign(rp(result), rm(rm(place, "pop"), "unwrap_or_else", { kind: "closure", params: [], body: this.defaultValue(element) }))];
+        case "insert": return [re(builtin("insert", ref(place, true), args[0]!, args[1]!))];
+        case "removeAt": return [assign(rp(result), builtin("remove_at", ref(place, true), args[0]!, { kind: "closure", params: [], body: this.defaultValue(element) }))];
+        case "clear": return [re(rm(place, "clear"))];
+        case "truncate": return [re(builtin("truncate", ref(place, true), args[0]!))];
+        case "fillRange": return [re(builtin("fill_range", ref(place, true), args[0]!, args[1]!, args[2]!))];
+        case "copyRange": return [re(source ? builtin("copy_range", ref(place, true), args[0]!, source, args[2]!, args[3]!) : builtin("copy_within", ref(place, true), args[2]!, args[0]!, args[3]!))];
+      }
+    }));
+    return block(statements, returns ? rp(result) : undefined);
   }
   copy(type: AotType): boolean {
     if (["number", "boolean", "style", "void", "undefined"].includes(type.kind)) return true;
@@ -162,13 +244,18 @@ class ModelRust {
           }
           return this.own(rf(object, e.name), memberType);
         };
-        const object = this.expr(e.object);
+        const object = declaration?.kind === "struct" && e.object.type.kind !== "option" ? this.borrow(e.object) ?? this.expr(e.object) : this.expr(e.object);
         if (e.object.type.kind === "option") return e.optional
           ? rm(object, "map", { kind: "closure", params: [rn("value")], body: extract(rp("value")) })
           : extract(rm(object, "expect", rl("checked option narrowing")));
         return extract(object);
       }
       case "index": {
+        const place = this.borrow(e.object);
+        if (place) {
+          const index = `index_${this.serial++}`, value = rm(rm(place, "get", cast(rp(index), rt("usize"))), "cloned");
+          return block([let_(index, this.expr(e.index))], e.type.kind === "option" ? value : rm(value, "unwrap_or_else", { kind: "closure", params: [], body: this.defaultValue(e.type) }));
+        }
         const value = rm(rm(this.expr(e.object), "get", cast(this.expr(e.index), rt("usize"))), "cloned");
         return e.type.kind === "option" ? value : rm(value, "unwrap_or_else", { kind: "closure", params: [], body: this.defaultValue(e.type) });
       }
@@ -183,7 +270,7 @@ class ModelRust {
       case "unary": {
         if (e.operator === "+") return this.expr(e.operand);
         const value = this.unwrapScalar(this.expr(e.operand), e.operand.type), type = this.scalarType(e.type);
-        return this.wrapScalar(e.operator === "-" && type.kind === "number" && !type.name.startsWith("f") ? rm(value, "wrapping_neg") : { kind: "unary", operator: e.operator, expr: value }, e.type);
+        return this.wrapScalar(e.operator === "-" && type.kind === "number" && !type.name.startsWith("f") ? rm(value, "wrapping_neg") : { kind: "unary", operator: e.operator === "~" ? "!" : e.operator, expr: value }, e.type);
       }
       case "binary": {
         if (e.operator === "??") return rm(this.expr(e.left), "unwrap_or_else", { kind: "closure", params: [], body: this.expr(e.right) });
@@ -196,6 +283,11 @@ class ModelRust {
           result = capacity === undefined ? rc(rp("microts", "model", "concat"), ref(textLeft), ref(textRight)) : rc({ kind: "path", path: ["microts", "model", "bounded_concat"], typeArgs: [{ kind: "const", value: capacity }] }, ref(textLeft), ref(textRight), rl(capacityName));
         } else if (e.operator === "/" && type.kind === "number") {
           result = bin("/", cast(scalarLeft, this.type(type)), cast(scalarRight, this.type(type)));
+        } else if (e.operator === "%" && type.kind === "number" && !type.name.startsWith("f")) {
+          result = rc(rp("microts", "builtins", "imod"), scalarLeft, scalarRight);
+        } else if (e.operator === ">>>" && type.kind === "number" && !type.name.startsWith("f")) {
+          const unsigned = ({ i8: "u8", i16: "u16", i32: "u32", i64: "u64" } as Record<string, string>)[type.name] ?? type.name;
+          result = cast(rm(cast(scalarLeft, rt(unsigned)), "wrapping_shr", cast(scalarRight, rt("u32"))), rt(type.name));
         } else if (type.kind === "number" && !type.name.startsWith("f") && ["+", "-", "*", "<<", ">>"].includes(e.operator)) {
           result = rm(scalarLeft, ({ "+": "wrapping_add", "-": "wrapping_sub", "*": "wrapping_mul", "<<": "wrapping_shl", ">>": "wrapping_shr" })[e.operator]!, ["<<", ">>"].includes(e.operator) ? cast(scalarRight, rt("u32")) : scalarRight);
         } else if (["<", ">", "<=", ">="].includes(e.operator) && e.left.type.kind === "string") result = bin(e.operator, rc(rp("microts", "builtins", "string_compare"), ref(left), ref(right)), rl(0));
@@ -222,6 +314,8 @@ class ModelRust {
       case "builtin": return this.builtin(e, capacity, capacityName);
       case "lambda": return { kind: "closure", params: e.params.map(p => rn(this.name(p.id))), body: block(this.expressionBody(e.body, e.type)) };
       case "sequence": return rc({ kind: "closure", params: [], body: block(this.expressionBody(e.body, e.type), this.expr(e.value, capacity, capacityName)) });
+      case "constant": return rm(rp(this.constantName(e.id)), "to_vec");
+      case "mutate": return this.mutate(e);
     }
   }
   invoke(id: number, args: ModelExpr[]): RustExpr {
@@ -242,7 +336,11 @@ class ModelRust {
       const name = `text_${this.serial++}`;
       return block([let_(name, rc({ kind: "qualifiedPath", type: this.type({ kind: "string" }, false, capacity), member: "new" }), true), re(rc(rp("microts", "model", "append_bounded_display"), ref(rp(name), true), ref(value), rl(capacityName)))], rp(name));
     }
-    if (e.name === "len") return rc(rp("microts", "builtins", "len"), ref(args[0]!));
+    if (e.name === "len") return rc(rp("microts", "builtins", "len"), ref(this.borrow(e.args[0]!) ?? args[0]!));
+    if ((MICROTS_NUMERIC_TYPES as readonly string[]).includes(e.name)) return cast(this.unwrapScalar(args[0]!, e.args[0]!.type), rt(e.name));
+    if (e.name === "embedBytes") return rm({ kind: "macro", name: ["include_bytes"], args: [args[0]!] }, "to_vec");
+    if (e.name === "codePoints") return rc(rp("microts", "builtins", "code_points"), ref(args[0]!));
+    if (e.name === "fromCodePoint") return rc(rp("microts", "builtins", "from_code_point"), args[0]!);
     if (["map", "filter", "find", "some"].includes(e.name)) {
       const collection = `items_${this.serial++}`, closure = e.args[1];
       if (closure?.kind !== "lambda") throw new Error(`${e.name} requires a bound lambda`);
@@ -262,6 +360,17 @@ class ModelRust {
     return this.wrapScalar(rc(rp("microts", "builtins", e.name), ...args.map((arg, index) => this.unwrapScalar(arg, e.args[index]!.type))), e.type);
   }
   statements(body: ModelBlock): RustStatement[] { return body.stmts.flatMap(stmt => this.statement(stmt)); }
+  /**
+   * Lowers a loop body. A loop reached by break or continue gets a label; when code
+   * follows the body in each iteration, continue leaves a labeled block around the body.
+   */
+  loopBody(id: number | undefined, body: ModelBlock, trailing: boolean): { label?: string; statements: RustStatement[] } {
+    if (id === undefined) return { statements: this.statements(body) };
+    const labels = { loop: `loop_${id}`, ...(trailing && this.continued.has(id) ? { body: `body_${id}` } : {}) };
+    this.loopLabels.set(id, labels);
+    const statements = this.statements(body);
+    return { label: labels.loop, statements: labels.body ? [re({ kind: "block", label: labels.body, block: rb(statements) })] : statements };
+  }
   statement(s: ModelStmt): RustStatement[] {
     switch (s.kind) {
       case "let": this.binders.set(s.binder.id, s.binder); return this.task?.fields.some(p => p.id === s.binder.id) ? [assign(this.storage(s.binder.id), this.coerce(s.init, s.binder.type, s.binder.name, s.binder.capacity))] : [let_(this.name(s.binder.id), this.coerce(s.init, s.binder.type, s.binder.name, s.binder.capacity), true, this.type(s.binder.type, false, s.binder.capacity))];
@@ -271,6 +380,15 @@ class ModelRust {
           const index = `index_${this.serial++}`, value = `element_${this.serial++}`;
           const owner = metadata(s.target.owner), type = owner?.type.kind === "array" ? owner.type.element : s.value.type;
           return [let_(index, this.expr(s.target.index)), let_(value, this.coerce(s.value, type, owner?.name)), re({ kind: "ifLet", pattern: { kind: "variant", path: ["Some"], tuple: [rn("element")] }, value: rm(this.storage(s.target.owner), "get_mut", cast(rp(index), rt("usize"))), then: rb([assign({ kind: "unary", operator: "*", expr: rp("element") }, rp(value))]) })];
+        }
+        if (s.target.kind === "path") {
+          const target = s.target, value = `value_${this.serial++}`;
+          const type = target.steps.reduce((type, step) => this.stepType(type, step), this.rootType(target.root.id));
+          const indexes = target.steps.filter(step => step.kind === "index").length;
+          // Evaluate index operands, then the value, then borrow the place.
+          const statements = this.withPlace(target, place => [assign(place, rp(value))]);
+          statements.splice(indexes, 0, let_(value, this.coerce(s.value, type, target.steps.at(-1)?.kind === "member" ? (target.steps.at(-1) as { name: string }).name : undefined)));
+          return statements;
         }
         const t = s.target, target = "id" in t ? this.storage(t.id) : rf(this.storage(t.owner), t.name);
         const binder = "id" in t ? metadata(t.id) : undefined, owner = t.kind === "member" ? metadata(t.owner) : undefined;
@@ -288,9 +406,17 @@ class ModelRust {
       case "untrack": case "batch": return [re(block(this.statements(s.body)))];
       case "for": {
         const bound = `bound_${this.serial++}`, index = this.name(s.binder.id);
-        return [let_(index, s.start ? this.expr(s.start) : rl(0, "i32"), true), let_(bound, this.expr(s.bound)), { kind: "while", condition: bin(s.inclusive ? "<=" : "<", rp(index), rp(bound)), body: rb([work("LoopIteration"), ...this.statements(s.body), ...(s.inclusive ? [condition(bin("==", rp(index), rp(bound)), [{ kind: "break" }])] : []), assign(rp(index), rm(rp(index), "wrapping_add", rl(1)))]) }];
+        const body = this.loopBody(s.loop, s.body, true);
+        return [let_(index, s.start ? this.expr(s.start) : rl(0, "i32"), true), let_(bound, this.expr(s.bound)), { kind: "while", condition: bin(s.inclusive ? "<=" : "<", rp(index), rp(bound)), label: body.label, body: rb([work("LoopIteration"), ...body.statements, ...(s.inclusive ? [condition(bin("==", rp(index), rp(bound)), [{ kind: "break" }])] : []), assign(rp(index), rm(rp(index), "wrapping_add", rl(1)))]) }];
       }
-      case "forOf": return [{ kind: "for", pattern: rn(this.name(s.binder.id)), iterable: this.expr(s.source), body: rb([work("LoopIteration"), ...this.statements(s.body)]) }];
+      case "forOf": { const body = this.loopBody(s.loop, s.body, false); return [{ kind: "for", pattern: rn(this.name(s.binder.id)), iterable: this.expr(s.source), label: body.label, body: rb([work("LoopIteration"), ...body.statements]) }]; }
+      case "while": {
+        const body = this.loopBody(s.loop, s.body, !!s.update || !!s.post), update = s.update ? this.statements(s.update) : [];
+        if (s.post) return [{ kind: "loop", label: body.label, body: rb([work("LoopIteration"), ...body.statements, condition({ kind: "unary", operator: "!", expr: this.expr(s.condition) }, [{ kind: "break" }])]) }];
+        return [{ kind: "while", condition: this.expr(s.condition), label: body.label, body: rb([work("LoopIteration"), ...body.statements, ...update]) }];
+      }
+      case "break": return [{ kind: "break", label: this.loopLabels.get(s.loop)!.loop }];
+      case "continue": { const labels = this.loopLabels.get(s.loop)!; return [labels.body ? { kind: "break", label: labels.body } : { kind: "continue", label: labels.loop }]; }
       case "switch": {
         const value = `switch_${this.serial++}`;
         let next: RustBlock = rb();
@@ -520,6 +646,11 @@ class ModelRust {
       traitMethods.push(fn("resume", [receiver(true), param("ready", rr(rt("Ready"))), param("_cmds", rr(rt("Vec", rt("Cmd")), true))], rb([re(rm(self, "prepare_resume", rp("ready")))])));
       traitMethods.push(fn("cancel_tasks", [receiver(true), param("cmds", rr(rt("Vec", rt("Cmd")), true))], rb([re(rm(field("commands"), "drain_to", rp("cmds")))])));
     }
+    for (const f of module.fields) if (f.hostName) {
+      const type = this.type(f.type, false, f.capacity);
+      methods.push(fn(f.hostName, [receiver()], rb([], ref(field(this.name(f.id)))), rr(type), true));
+      methods.push(fn(`${f.hostName}_mut`, [receiver(true)], rb([], ref(field(this.name(f.id)), true)), rr(type, true), true));
+    }
     this.items.push({ kind: "struct", name: modelName, public: true, fields });
     this.items.push({ kind: "impl", type: rt(modelName), methods });
     if (!this.view) this.items.push({ kind: "trait", name: traitName, public: true, methods: traitMethods.map(f => ({ ...f, body: undefined })) });
@@ -698,8 +829,13 @@ class ModelRust {
     this.items.push({ kind: "extern", name: "alloc" }, { kind: "use", path: ["alloc", "borrow"], names: ["ToOwned"] }, { kind: "use", path: ["alloc", "string"], names: ["String"] }, { kind: "use", path: ["alloc", "vec"], names: ["Vec"] }, { kind: "use", path: ["microts", "model"], names: ["Cmd", "Ready", "Depth", "NodeSlot", "TaskId", "RequestId", "heapless", "Wait", "WaitNode", "ServiceRequests", "TaskState", "TaskOutcome", "TaskValue", "TaskResult", "TaskReady", "Completion", "Value", "ModelValue"] });
     if (this.view) this.items.push({ kind: "use", path: ["super"], names: ["*"] }); else this.emitTypes();
     this.codecs();
+    for (const [id, value] of this.constants) {
+      if (value.kind === "builtin" && value.name === "embedBytes") this.items.push({ kind: "static", name: this.constantName(id), type: rr({ kind: "slice", element: rt("u8") }, false, "static"), value: { kind: "macro", name: ["include_bytes"], args: [this.expr(value.args[0]!)] } });
+      else if (value.kind === "array" && value.type.kind === "array") this.items.push({ kind: "static", name: this.constantName(id), type: { kind: "array", element: this.type(value.type.element), length: value.items.length }, value: { kind: "array", elements: value.items.map(item => this.expr(item)) } });
+      else throw new Error(`Model constant ${id} cannot be stored as a static`);
+    }
     for (const module of this.program.modules) this.module(module);
-    return printRust({ items: this.items, attributes: [{ name: "allow", args: ["dead_code", "unused_imports", "unused_mut", "non_snake_case", "unused_variables"] }] });
+    return printRust({ items: this.items, attributes: [{ name: "allow", args: ["dead_code", "unused_imports", "unused_mut", "non_snake_case", "unused_variables", "unused_labels", "non_upper_case_globals", "unused_braces"] }] });
   }
 }
 

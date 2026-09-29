@@ -385,6 +385,28 @@ a TypeScript declaration for another SDK is not enough to admit a service.
 A native host must provide its transport and typed deliveries. See
 [the host boundary](/docs/microts-boundaries/#a-task-requests-work-the-host-performs-it).
 
+## Native game subset
+
+Compiled models also admit the forms below. They target native AOT hosts that
+drive a model once per frame, such as a game loop; guest builds lower the same
+Model IR to JavaScript, and the reference interpreter executes it.
+
+| Form | Rule |
+|---|---|
+| State modules | A module with top-level `let` fields, or one importing such a module, is a state module. Its fields and functions belong to the root region. Only the root and other state modules import it; factories do not. Exported fields are readable and writable in place by importers, and the native model exposes them as `<module>_<name>()` and `<module>_<name>_mut()` |
+| Assignable places | `a[i] = v`, `a[i].x += v`, `s.items[j]++` on locals and fields, including imported state fields. An out-of-range element write is ignored after its operands are evaluated |
+| Loops | `while`, `do`-`while`, `break`, `continue` and `for` loops with any condition and update, in synchronous functions. `for (let i = a; i < b; i++)` keeps its bound-once rule; other `for` loops re-evaluate their condition and run their update after `continue` |
+| Operators | `%` on numbers (an integer remainder by zero is `0`), `~`, and `>>>` in the operand's width |
+| Numeric conversion | `i8()` … `u64()`, `usize()`, `f32()`, `f64()` from the std module, with Rust `as` semantics: floats truncate toward zero and saturate, integers wrap |
+| Float math | `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `exp`, `log`, `atan2`, `pow`, `hypot` on `f32` or `f64` |
+| Arrays | `fill(n, v)` allocates; `push`, `pop`, `insert`, `removeAt`, `clear`, `truncate`, `fillRange` and `copyRange` change an assignable array place. `copyRange` takes numeric, boolean or enum elements and clips its window to both arrays |
+| Constants | A module constant holding an array literal of scalars is stored once as a static; `embedBytes("./file.bin")` embeds a file as a `u8[]` static |
+| Strings | `codePoints(s)` and `fromCodePoint(n)` |
+| Imports | `tsconfig.json` `paths` next to the entry map non-relative specifiers to local modules |
+
+Array element and member reads of fields, locals and constants index the
+stored value in place; they do not copy the array.
+
 ## Current implementation limits
 
 The following combinations are not portable Model AOT forms. Some pass the
