@@ -328,43 +328,42 @@ impl SpecializationContract<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::{format, vec};
+    use crate::assets::{AssetInput, AssetKind};
+    use alloc::{boxed::Box, format, vec};
 
     #[test]
     fn sha256_standard_vectors() {
+        let hex = |bytes: &[u8]| format!("{}", content_hash(bytes));
         assert_eq!(
-            format!("{}", content_hash(b"")),
+            hex(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
         assert_eq!(
-            format!("{}", content_hash(b"abc")),
+            hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         assert_eq!(
-            format!(
-                "{}",
-                content_hash(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")
-            ),
+            hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
         );
         assert_eq!(
-            format!("{}", content_hash(&vec![b'a'; 1_000_000])),
+            hex(&vec![b'a'; 1_000_000]),
             "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
         );
     }
 
-    pub(crate) fn atlas(slot: u8, advance: u8) -> Vec<u8> {
+    /// A one-glyph atlas for `slot`; `advance` changes its bytes, not its shape.
+    fn atlas(slot: u8, advance: u8) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&spec::font_atlas::MAGIC.to_le_bytes());
         bytes.extend_from_slice(&spec::font_atlas::VERSION.to_le_bytes());
         bytes.extend_from_slice(&1u16.to_le_bytes());
         bytes.extend_from_slice(&[1, 1, 1, 1, slot, 0, 1, 0]);
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&0u16.to_le_bytes());
-        bytes.extend_from_slice(&[advance, 0, 255]);
+        bytes.extend_from_slice(&[0, 0, 0, 0, 0, 0, advance, 0, 255]);
         bytes
     }
 
+    /// An empty style table.
     fn styles() -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&spec::style_table::MAGIC.to_le_bytes());
@@ -373,81 +372,87 @@ mod tests {
         bytes
     }
 
+    fn expecting(font: &[u8]) -> [FontIdentity; 1] {
+        [FontIdentity {
+            slot: 0,
+            hash: Some(content_hash(font)),
+        }]
+    }
+
+    /// 480x272 (the default viewport), 60 Hz, baked text and `styles()`.
+    fn contract(fonts: &[FontIdentity]) -> SpecializationContract<'_> {
+        SpecializationContract {
+            viewport: (480.0, 272.0),
+            tick_hz: 60,
+            text_provider: TextProvider::Baked,
+            styles: content_hash(&styles()),
+            fonts,
+        }
+    }
+
+    /// A Ui that records identities and has `styles()` and `font` loaded.
+    fn host(font: &[u8]) -> Ui {
+        let mut ui = Ui::new();
+        ui.enable_font_identity();
+        assert!(ui.load_styles(&styles()));
+        assert!(ui.load_font_atlas(font));
+        ui
+    }
+
     #[test]
-    fn opt_in_is_required_before_loading_and_failed_loads_preserve_identity() {
+    fn identities_are_recorded_after_opt_in_and_survive_failed_loads() {
         let font = atlas(0, 1);
         let mut ui = Ui::new();
         assert!(ui.load_font_atlas(&font));
-        assert_eq!(ui.font_atlas_identity(0), None);
         ui.enable_font_identity();
-        assert_eq!(ui.font_atlas_identity(0), None);
+        assert_eq!(ui.font_atlas_identity(0), None, "loaded before opt-in");
         assert!(ui.load_font_atlas(&font));
-        let hash = ui.font_atlas_identity(0);
-        assert_eq!(hash, Some(content_hash(&font)));
-        ui.enable_font_identity();
+        let hash = Some(content_hash(&font));
         assert_eq!(ui.font_atlas_identity(0), hash);
+        ui.enable_font_identity();
         assert!(!ui.load_font_atlas(b"bad"));
         assert_eq!(ui.font_atlas_identity(0), hash);
     }
 
     #[test]
-    fn identities_distinguish_bytes_not_revision_numbers() {
+    fn contracts_compare_bytes_not_revision_numbers() {
         let font = atlas(0, 1);
-        let other = atlas(0, 2);
-        let style = styles();
-        let expected = [FontIdentity {
-            slot: 0,
-            hash: Some(content_hash(&font)),
-        }];
-        let contract = SpecializationContract {
-            viewport: (480.0, 272.0),
-            tick_hz: 60,
-            text_provider: TextProvider::Baked,
-            styles: content_hash(&style),
-            fonts: &expected,
-        };
-        let mut first = Ui::new();
-        first.enable_font_identity();
-        assert!(first.load_styles(&style));
-        assert!(first.load_font_atlas(&font));
-        let mut second = Ui::new();
-        second.enable_font_identity();
-        assert!(second.load_styles(&style));
-        assert!(second.load_font_atlas(&other));
-        assert_eq!(first.font_atlas_revision(0), second.font_atlas_revision(0));
-        assert!(contract.matches(&first));
+        let fonts = expecting(&font);
+        let contract = contract(&fonts);
+        let mut same = host(&font);
+        let other = host(&atlas(0, 2));
+        assert_eq!(same.font_atlas_revision(0), other.font_atlas_revision(0));
+        assert!(contract.matches(&same));
+        let diagnostics = contract.validate(&other).diagnostics;
         assert!(matches!(
-            contract.validate(&second).diagnostics.as_slice(),
+            diagnostics.as_slice(),
             [SpecializationDiagnostic::FontIdentity { slot: 0, .. }]
         ));
-        assert!(first.load_font_atlas(&font));
-        assert_ne!(first.font_atlas_revision(0), second.font_atlas_revision(0));
-        assert!(contract.matches(&first));
-        let before = first.viewport();
-        first.set_viewport(320.0, 240.0);
-        let result = contract.validate(&first);
-        assert!(!result.enabled);
+        assert!(same.load_font_atlas(&font));
+        assert_ne!(same.font_atlas_revision(0), other.font_atlas_revision(0));
         assert!(
-            matches!(result.diagnostics.as_slice(), [SpecializationDiagnostic::Viewport { expected, actual }] if *expected == before && *actual == (320.0, 240.0))
+            contract.matches(&same),
+            "reloading the same bytes keeps the identity"
+        );
+        same.set_viewport(320.0, 240.0);
+        let result = contract.validate(&same);
+        let viewport = SpecializationDiagnostic::Viewport {
+            expected: (480.0, 272.0),
+            actual: (320.0, 240.0),
+        };
+        assert_eq!(
+            (result.enabled, result.diagnostics),
+            (false, vec![viewport])
         );
     }
 
     #[test]
-    fn native_text_and_missing_identities_use_the_generic_path() {
-        let style = styles();
-        let expected = [FontIdentity {
-            slot: 0,
-            hash: Some(content_hash(&atlas(0, 1))),
-        }];
-        let contract = SpecializationContract {
-            viewport: (480.0, 272.0),
-            tick_hz: 60,
-            text_provider: TextProvider::Baked,
-            styles: content_hash(&style),
-            fonts: &expected,
-        };
+    fn missing_identities_native_text_and_tick_rate_disable_the_contract() {
+        let font = atlas(0, 1);
+        let fonts = expecting(&font);
+        let contract = contract(&fonts);
         let mut ui = Ui::new();
-        assert!(ui.load_styles(&style));
+        assert!(ui.load_styles(&styles()));
         let result = contract.validate(&ui);
         assert!(!result.enabled);
         assert!(result
@@ -456,87 +461,58 @@ mod tests {
         assert!(result
             .diagnostics
             .contains(&SpecializationDiagnostic::MissingFontIdentity { slot: 0 }));
-        ui.enable_font_identity();
-        assert!(ui.load_styles(&style));
-        assert!(ui.load_font_atlas(&atlas(0, 1)));
+        let mut ui = host(&font);
         assert!(contract.matches(&ui));
-        ui.set_text_measure(Some(alloc::boxed::Box::new(|_, _, _, _| (1.0, 1.0))));
+        ui.set_text_measure(Some(Box::new(|_, _, _, _| (1.0, 1.0))));
         assert_eq!(
             contract.validate(&ui).diagnostics,
             vec![SpecializationDiagnostic::NativeTextProvider]
         );
         ui.set_text_measure(None);
         assert!(ui.set_tick_rate(50));
-        assert_eq!(
-            contract.validate(&ui).diagnostics,
-            vec![SpecializationDiagnostic::TickRate {
-                expected: 60,
-                actual: 50
-            }]
-        );
+        let tick = SpecializationDiagnostic::TickRate {
+            expected: 60,
+            actual: 50,
+        };
+        assert_eq!(contract.validate(&ui).diagnostics, vec![tick]);
     }
 
     #[test]
-    fn atomic_assets_and_streaming_cannot_leave_stale_identities() {
-        use crate::assets::{AssetInput, AssetKind};
-        let font = atlas(0, 1);
-        let style = styles();
+    fn failed_asset_batches_and_streaming_leave_no_stale_identity() {
+        let (font, style) = (atlas(0, 1), styles());
+        let input = |kind, bytes| AssetInput { kind, bytes };
         let mut ui = Ui::new();
         ui.enable_font_identity();
-        ui.load_assets(
-            &[
-                AssetInput {
-                    kind: AssetKind::Styles,
-                    bytes: &style,
-                },
-                AssetInput {
-                    kind: AssetKind::Font,
-                    bytes: &font,
-                },
-            ],
-            &mut [-1, -1],
-        )
-        .unwrap();
+        let batch = [
+            input(AssetKind::Styles, &style[..]),
+            input(AssetKind::Font, &font[..]),
+        ];
+        ui.load_assets(&batch, &mut [-1, -1]).unwrap();
         assert_eq!(ui.font_atlas_identity(0), Some(content_hash(&font)));
         assert_eq!(ui.styles_identity(), Some(content_hash(&style)));
         let replacement = atlas(0, 2);
-        assert!(ui
-            .load_assets(
-                &[
-                    AssetInput {
-                        kind: AssetKind::Font,
-                        bytes: &replacement
-                    },
-                    AssetInput {
-                        kind: AssetKind::Styles,
-                        bytes: b"bad"
-                    }
-                ],
-                &mut [-1, -1]
-            )
-            .is_err());
-        assert_eq!(ui.font_atlas_identity(0), Some(content_hash(&font)));
+        let failing = [
+            input(AssetKind::Font, &replacement[..]),
+            input(AssetKind::Styles, b"bad"),
+        ];
+        assert!(ui.load_assets(&failing, &mut [-1, -1]).is_err());
+        assert_eq!(
+            ui.font_atlas_identity(0),
+            Some(content_hash(&font)),
+            "the failed batch is atomic"
+        );
+        // A PFS1 config that streams slot 0 glyphs.
         let mut stream = vec![0u8; 20];
         stream[..4].copy_from_slice(&crate::font_stream::CONFIG_MAGIC.to_le_bytes());
         stream[4..8].copy_from_slice(&1u32.to_le_bytes());
         stream[9..15].copy_from_slice(&[1, 1, 1, 1, 1, 1]);
         stream[16..18].copy_from_slice(&1u16.to_le_bytes());
         assert!(ui.font_stream_configure(&stream));
-        assert!(ui.font_atlas_is_streamed(0));
         assert_eq!(ui.font_atlas_identity(0), None);
-        let expected = [FontIdentity {
-            slot: 0,
-            hash: Some(content_hash(&font)),
-        }];
-        let contract = SpecializationContract {
-            viewport: (480.0, 272.0),
-            tick_hz: 60,
-            text_provider: TextProvider::Baked,
-            styles: content_hash(&style),
-            fonts: &expected,
-        };
+        let fonts = expecting(&font);
+        let diagnostics = contract(&fonts).validate(&ui).diagnostics;
         assert_eq!(
-            contract.validate(&ui).diagnostics,
+            diagnostics,
             vec![SpecializationDiagnostic::StreamedFont { slot: 0 }]
         );
     }

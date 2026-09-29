@@ -1,18 +1,16 @@
+// Native specialization must not reach the guest: the serialized IR and the
+// bundled guest JavaScript are byte-identical with it on and off.
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { createHash } from "node:crypto";
 import { jsxPlugin } from "../framework/compiler/jsx-plugin.ts";
 import { generateStylesModule } from "../framework/compiler/tailwind.ts";
 import { analyzeAot, buildAot } from "../microts/compiler/aot-build.ts";
-import { analyzeAotSpecialization } from "../microts/compiler/aot-specialization.ts";
 import type { AotProgram } from "../microts/compiler/aot-ir.ts";
+import { analyzeAotSpecialization } from "../microts/compiler/aot-specialization.ts";
+import { OUT } from "./helpers/microts-specialization.ts";
 
-const run = resolve(".pocket-build/validation/microts-specialization", `guest-${process.pid}-${Date.now()}`);
-const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
-
-// Use the actual framework bundling plugin with a build-local style module.
-// This gate does not rewrite the shared styles.generated.ts mirror.
+/** Bundles the guest with the framework plugin and a build-local style module. */
 async function guest(app: string, program: AotProgram): Promise<Uint8Array> {
   const solid = app === "solid-aot-lab", entry = resolve(`apps/${app}/main.${solid ? "tsx" : "ts"}`);
   const { bytes, ...styles } = program.styles;
@@ -26,27 +24,16 @@ async function guest(app: string, program: AotProgram): Promise<Uint8Array> {
 }
 
 test.each(["solid-aot-lab", "vue-sfc-lab"])("%s guest bytes and serialized IR do not depend on native specialization", async app => {
-  const directory = resolve(run, app), entry = resolve(`apps/${app}/app.${app === "solid-aot-lab" ? "tsx" : "vue"}`);
-  mkdirSync(directory, { recursive: true });
+  const entry = resolve(`apps/${app}/app.${app === "solid-aot-lab" ? "tsx" : "vue"}`);
   const initial = analyzeAot(entry, { strict: true });
   const baseline = await guest(app, initial);
-  const ir: Record<string, string> = {}, bundles: Record<string, string> = {};
   for (const specialize of ["off", "on"] as const) {
-    const irPath = resolve(directory, specialize, "view.json");
-    const built = await buildAot(entry, { specialize, strict: true, format: false, outDir: resolve(directory, specialize), ir: irPath });
-    const serialized = readFileSync(irPath, "utf8"), modelPath = irPath.replace(/\.json$/, ".model.json");
-    expect(serialized).toBe(JSON.stringify(initial, null, 2) + "\n");
-    if (initial.model) expect(readFileSync(modelPath, "utf8")).toBe(JSON.stringify(initial.model, null, 2) + "\n");
-    else expect(existsSync(modelPath)).toBe(false);
-    // Running the report in the same process must not alter guest caches or IR.
-    analyzeAotSpecialization(built.program);
-    const bundle = await guest(app, built.program);
-    expect(bundle).toEqual(baseline);
-    ir[specialize] = hash(serialized);
-    bundles[specialize] = hash(bundle);
-    writeFileSync(resolve(directory, specialize, "guest.js"), bundle);
+    const outDir = resolve(OUT, "guest", app, specialize), ir = resolve(outDir, "view.json"), modelIr = resolve(outDir, "view.model.json");
+    const built = await buildAot(entry, { specialize, strict: true, format: false, outDir, ir });
+    expect(readFileSync(ir, "utf8")).toBe(JSON.stringify(initial, null, 2) + "\n");
+    if (initial.model) expect(readFileSync(modelIr, "utf8")).toBe(JSON.stringify(initial.model, null, 2) + "\n");
+    else expect(existsSync(modelIr)).toBe(false);
+    analyzeAotSpecialization(built.program); // the report runs in the same process
+    expect(await guest(app, built.program)).toEqual(baseline);
   }
-  expect(ir.on).toBe(ir.off);
-  expect(bundles.on).toBe(bundles.off);
-  writeFileSync(resolve(directory, "receipt.json"), JSON.stringify({ app, command: "bun test tests/microts-specialization-guest.test.ts", acceptance: "byte equality for guest JS, View IR, and Model IR", guestBytes: baseline.length, baseline: hash(baseline), ir, bundles }, null, 2) + "\n");
 }, 120_000);

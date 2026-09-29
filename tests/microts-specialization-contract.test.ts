@@ -1,105 +1,75 @@
+// Environment contracts record the viewport, tick rate and the exact bytes of
+// the styles and font atlases a specialized build assumes. The runtime side
+// (engine/core/src/specialization.rs) has its own unit tests.
 import { expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { MAX_FONT_SLOTS, PROP, encodeStyleTable } from "../contracts/spec/spec.ts";
-import { I32, type AotNode, type AotProgram } from "../microts/compiler/aot-ir.ts";
-import { createSpecializationContract, emitSpecializationContract, specializationContentHash } from "../microts/compiler/aot-specialization-contract.ts";
+import { createSpecializationContract, emitSpecializationContract, specializationContentHash, type SpecializationContractOptions } from "../microts/compiler/aot-specialization-contract.ts";
+import { fontAtlas, freeze, program, runCrate, rustBytes, text, vm } from "./helpers/microts-specialization.ts";
 
-const loc = { file: "contract.tsx", line: 1, column: 1, offset: 0 };
-const text = (props: Extract<AotNode, { kind: "element" }>["props"] = []): AotNode => ({ kind: "element", id: 1, tag: "Text", style: -1, props, focusable: false, events: [], children: [], loc });
-const program = (nodes: AotNode[] = [text()]): AotProgram => ({
-  version: 1, root: "App", types: [], diagnostics: [],
-  components: [{ name: "App", file: loc.file, root: true, props: [], events: [], slots: [], values: [], functions: [], constants: [], children: [], nodes, nodeCount: 1, memoCount: 0, handlerCount: 0 }],
-  styles: { records: [], anims: [], ids: {}, bytes: [...encodeStyleTable([], [])], usedFontSlots: [0] },
-});
-function atlas(slot: number, advance = 1): Uint8Array {
-  return Uint8Array.from([68, 67, 70, 65, 3, 0, 1, 0, 1, 1, 1, 1, slot, 0, 1, 0, 0, 0, 0, 0, 0, 0, advance, 0, 255]);
-}
-const options = { viewport: [480, 272] as const, tickRate: 60 };
+const environment = { viewport: [480, 272] as const, tickRate: 60 };
+const withText = () => program([text([])], { fontSlots: [0] });
+const contract = (options: Partial<SpecializationContractOptions> = {}, input = withText()) =>
+  createSpecializationContract(input, { ...environment, ...options });
+const atlases = (...bytes: Uint8Array[]) => ({ fontAtlases: bytes.map(atlas => ({ slot: 0, bytes: atlas })) });
 
-test("native contract identities use exact bytes and never annotate the shared IR", () => {
-  const input = program();
-  const before = JSON.stringify(input);
-  Object.freeze(input); Object.freeze(input.styles); Object.freeze(input.styles.bytes);
-  const first = createSpecializationContract(input, { ...options, fontAtlases: [{ slot: 0, bytes: atlas(0) }] });
-  const same = createSpecializationContract(input, { ...options, fontAtlases: [{ slot: 0, bytes: atlas(0) }] });
-  const different = createSpecializationContract(input, { ...options, fontAtlases: [{ slot: 0, bytes: atlas(0, 2) }] });
-  expect(first).toEqual(same);
-  expect(first.fonts[0]!.hash).not.toBe(different.fonts[0]!.hash);
-  expect(first.textProvider).toBe("baked");
-  expect(first.diagnostics).toEqual([]);
-  expect(first.stylesHash).toBe(specializationContentHash(encodeStyleTable([], [])));
-  expect(JSON.stringify(input)).toBe(before);
-  expect(specializationContentHash(new TextEncoder().encode("abc"))).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+test("contracts hash exact atlas and style bytes and leave the IR unchanged", () => {
+  const input = freeze(withText());
+  const first = contract(atlases(fontAtlas()), input);
+  expect(contract(atlases(fontAtlas()), input)).toEqual(first);
+  expect(contract(atlases(fontAtlas({ tofu: 2 })), input).fonts[0]!.hash).not.toBe(first.fonts[0]!.hash);
+  expect(first).toMatchObject({ textProvider: "baked", diagnostics: [], stylesHash: specializationContentHash(Uint8Array.from(input.styles.bytes)) });
 });
 
-test("absent atlas bytes are explicit deopt facts, and arbitrary font bindings include all slots", () => {
-  const missing = createSpecializationContract(program(), options);
+test("a missing atlas is diagnosed, and a dynamic font slot requires every slot", () => {
+  const missing = contract();
   expect(missing.fonts).toEqual([{ slot: 0, hash: null }]);
   expect(missing.diagnostics).toEqual([{ code: "VS205", slot: 0, message: expect.stringContaining("generic path") }]);
-  const dynamic = program([text([{ prop: PROP.fontSlot, name: "fontSlot", memo: 1, value: { kind: "binding", scope: "vm", name: "font", type: I32, loc } }])]);
-  expect(createSpecializationContract(dynamic, options).fonts).toHaveLength(MAX_FONT_SLOTS);
-  expect(createSpecializationContract(dynamic, { ...options, fontSlots: [4, 1, 4] }).fonts.map(font => font.slot)).toEqual([1, 4]);
-  expect(createSpecializationContract(program([]), options).fonts).toEqual([]);
+  const dynamicFont = text([]);
+  dynamicFont.props = [{ prop: PROP.fontSlot, name: "fontSlot", memo: 1, value: vm("font") }];
+  const dynamic = program([dynamicFont], { fontSlots: [0] });
+  expect(contract({}, dynamic).fonts).toHaveLength(MAX_FONT_SLOTS);
+  expect(contract({ fontSlots: [4, 1, 4] }, dynamic).fonts.map(font => font.slot)).toEqual([1, 4]);
+  expect(contract({}, program([], { fontSlots: [0] })).fonts).toEqual([]); // no Text, no font
 });
 
-test("invalid target facts and mislabeled atlas bytes fail at the compiler boundary", () => {
-  for (const viewport of [[NaN, 272], [0, 272], [480, 32001]] as const) expect(() => createSpecializationContract(program(), { ...options, viewport })).toThrow("viewport");
-  for (const tickRate of [0, 241, 59.5]) expect(() => createSpecializationContract(program(), { ...options, tickRate })).toThrow("tick rate");
-  expect(() => createSpecializationContract(program(), { ...options, fontSlots: [-1] })).toThrow("font slot");
-  expect(() => createSpecializationContract(program(), { ...options, fontAtlases: [{ slot: 0, bytes: atlas(1) }] })).toThrow("header");
-  expect(() => createSpecializationContract(program(), { ...options, fontAtlases: [{ slot: 0, bytes: atlas(0) }, { slot: 0, bytes: atlas(0) }] })).toThrow("Duplicate");
-  const rounded = createSpecializationContract(program([]), { ...options, viewport: [1.0000001, 272] });
-  expect(rounded.viewport[0]).toBe(Math.fround(1.0000001));
+test("invalid environments and mislabeled atlases are rejected", () => {
+  const create = (options: Partial<SpecializationContractOptions>) => () => contract(options);
+  for (const viewport of [[NaN, 272], [0, 272], [480, 32001]] as const) expect(create({ viewport })).toThrow("viewport");
+  for (const tickRate of [0, 241, 59.5]) expect(create({ tickRate })).toThrow("tick rate");
+  expect(create({ fontSlots: [-1] })).toThrow("font slot");
+  expect(create(atlases(fontAtlas({ slot: 1 })))).toThrow("header");
+  expect(create(atlases(fontAtlas(), fontAtlas()))).toThrow("Duplicate");
+  expect(contract({ viewport: [1.0000001, 272] }).viewport[0]).toBe(Math.fround(1.0000001)); // stored as f32
 });
 
-test("generated Rust constant validates identities across revisions, providers, styles and viewport", async () => {
-  const input = program();
-  const contract = createSpecializationContract(input, { ...options, fontAtlases: [{ slot: 0, bytes: atlas(0) }] });
-  const missing = createSpecializationContract(input, options);
-  const rust = emitSpecializationContract(contract) + emitSpecializationContract(missing, "MISSING_ATLAS_CONTRACT");
-  expect(rust).toContain("SpecializationContract<'static>");
-  expect(rust).toContain("text_provider: microts::pocketjs_core::specialization::TextProvider::Baked");
-  const directory = resolve(".pocket-build/validation/microts-specialization", `contract-${process.pid}-${Date.now()}`);
-  mkdirSync(resolve(directory, "src"), { recursive: true });
-  writeFileSync(resolve(directory, "Cargo.toml"), `[package]\nname = "microts-specialization-contract-test"\nversion = "0.0.0"\nedition = "2021"\n[workspace]\n[dependencies]\npocketjs-core = { path = ${JSON.stringify(resolve("engine/core"))}, features = ["std"] }\n`);
-  const bytes = (value: Uint8Array | number[]) => `[${[...value].join(",")}]`;
+test("the emitted Rust contract checks the same identities as the runtime", () => {
+  const input = withText();
+  const expected = emitSpecializationContract(contract(atlases(fontAtlas())));
+  const missing = emitSpecializationContract(contract(), "MISSING_ATLAS_CONTRACT");
+  // Rust's SHA-256 against node:crypto around the 56- and 64-byte padding boundaries.
   const hashes = [0, 1, 55, 56, 63, 64, 65, 127, 128].map(length => {
     const data = Uint8Array.from({ length }, (_, index) => index);
-    return `assert_eq!(format!("{}", content_hash(&${bytes(data)})), "${specializationContentHash(data)}");`;
-  }).join("\n");
-  writeFileSync(resolve(directory, "src/main.rs"), `mod microts { pub use pocketjs_core; }
-use pocketjs_core::{Ui, specialization::{content_hash, SpecializationDiagnostic}};
-${rust}
-fn main() {
-  ${hashes}
-  let mut ui = Ui::new(); ui.enable_font_identity();
-  assert!(ui.load_styles(&${bytes(input.styles.bytes)}));
-  assert!(ui.load_font_atlas(&${bytes(atlas(0))}));
-  assert!(SPECIALIZATION_CONTRACT.matches(&ui));
-  let revision = ui.font_atlas_revision(0);
-  assert!(ui.load_font_atlas(&${bytes(atlas(0))}));
-  assert_ne!(revision, ui.font_atlas_revision(0));
-  assert!(SPECIALIZATION_CONTRACT.matches(&ui));
-  assert_eq!(MISSING_ATLAS_CONTRACT.validate(&ui).diagnostics, vec![SpecializationDiagnostic::MissingExpectedFontIdentity { slot: 0 }]);
-  let mut other = Ui::new(); other.enable_font_identity();
-  assert!(other.load_styles(&${bytes(input.styles.bytes)}));
-  assert!(other.load_font_atlas(&${bytes(atlas(0, 2))}));
-  assert_eq!(revision, other.font_atlas_revision(0));
-  assert!(matches!(SPECIALIZATION_CONTRACT.validate(&other).diagnostics.as_slice(), [SpecializationDiagnostic::FontIdentity { slot: 0, .. }]));
-  ui.set_viewport(320.0, 240.0);
-  assert!(matches!(SPECIALIZATION_CONTRACT.validate(&ui).diagnostics.as_slice(), [SpecializationDiagnostic::Viewport { .. }]));
-  ui.set_viewport(480.0, 272.0);
-  ui.set_text_measure(Some(Box::new(|_, _, _, _| (1.0, 1.0))));
-  assert_eq!(SPECIALIZATION_CONTRACT.validate(&ui).diagnostics, vec![SpecializationDiagnostic::NativeTextProvider]);
-  ui.set_text_measure(None);
-  assert!(ui.load_styles(&${bytes(encodeStyleTable([{ base: [{ prop: PROP.opacity, value: 0 }] }], []))}));
-  assert!(matches!(SPECIALIZATION_CONTRACT.validate(&ui).diagnostics.as_slice(), [SpecializationDiagnostic::StylesIdentity { .. }]));
-  assert_eq!(ui.viewport(), (480.0, 272.0)); // validation does not modify the host environment.
+    return `assert_eq!(content_hash(${rustBytes(data)}).to_string(), "${specializationContentHash(data)}");`;
+  });
+  const otherStyles = encodeStyleTable([{ base: [{ prop: PROP.opacity, value: 0 }] }]);
+  runCrate("specialization-contract", { "main.rs": `use microts::pocketjs_core::specialization::{content_hash, SpecializationDiagnostic as D};
+use microts::pocketjs_core::Ui;
+${expected}
+${missing}
+fn host(atlas: &[u8]) -> Ui {
+  let mut ui = Ui::new();
+  ui.enable_font_identity();
+  assert!(ui.load_styles(${rustBytes(input.styles.bytes)}) && ui.load_font_atlas(atlas));
+  ui
 }
-`);
-  const result = Bun.spawn(["cargo", "run", "--quiet", "--manifest-path", resolve(directory, "Cargo.toml")], { env: { ...process.env, CARGO_TARGET_DIR: resolve("engine/core/target") }, stdout: "pipe", stderr: "pipe" });
-  const [status, output, errors] = await Promise.all([result.exited, new Response(result.stdout).text(), new Response(result.stderr).text()]);
-  writeFileSync(resolve(directory, "cargo.log"), output + errors);
-  expect(status, output + errors).toBe(0);
+fn main() {
+  ${hashes.join("\n  ")}
+  let mut ui = host(${rustBytes(fontAtlas())});
+  assert!(SPECIALIZATION_CONTRACT.matches(&ui));
+  assert_eq!(MISSING_ATLAS_CONTRACT.validate(&ui).diagnostics, vec![D::MissingExpectedFontIdentity { slot: 0 }]);
+  let other = host(${rustBytes(fontAtlas({ tofu: 2 }))});
+  assert!(matches!(SPECIALIZATION_CONTRACT.validate(&other).diagnostics.as_slice(), [D::FontIdentity { slot: 0, .. }]));
+  assert!(ui.load_styles(${rustBytes(otherStyles)}));
+  assert!(matches!(SPECIALIZATION_CONTRACT.validate(&ui).diagnostics.as_slice(), [D::StylesIdentity { .. }]));
+}` }, ["std"]);
 }, 120_000);

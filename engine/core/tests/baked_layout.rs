@@ -1,134 +1,116 @@
+//! Baked region layouts. A precomputed rect table replaces the first region
+//! solve only while its guard (unrounded origin and root size) holds.
+
+mod common;
+
+use common::{fixed, set, view};
+use pocketjs_core::spec::prop::*;
 use pocketjs_core::{spec, tree::LayoutRect, RegionLayoutGuard, Ui};
 
-fn fixture(origin: f64) -> (Ui, Vec<i32>) {
+type Rects = Vec<(i32, LayoutRect)>;
+
+/// A region root with a child and a grandchild at fractional sizes.
+fn scene(margin: f64) -> (Ui, Vec<i32>) {
     let mut ui = Ui::new();
     ui.set_draw_cache_budget(0);
-    let root = ui.create_node(spec::NodeType::View as u8);
-    ui.set_prop(root, spec::prop::WIDTH, 70.3);
-    ui.set_prop(root, spec::prop::HEIGHT, 50.6);
-    ui.set_prop(root, spec::prop::SHRINK, 0.0);
-    ui.set_prop(root, spec::prop::PADDING_L, 2.3);
-    ui.set_prop(root, spec::prop::PADDING_T, 1.3);
-    ui.set_prop(root, spec::prop::MARGIN_L, origin);
-    ui.set_prop(root, spec::prop::BG_COLOR, 0xffaa_7755u32 as f64);
-    ui.insert_before(spec::ROOT_ID, root, 0);
-    let child = ui.create_node(spec::NodeType::View as u8);
-    ui.set_prop(child, spec::prop::WIDTH, 20.5);
-    ui.set_prop(child, spec::prop::HEIGHT, 15.5);
-    ui.set_prop(child, spec::prop::SHRINK, 0.0);
-    ui.set_prop(child, spec::prop::BG_COLOR, 0xff55_7799u32 as f64);
-    ui.insert_before(root, child, 0);
-    let grandchild = ui.create_node(spec::NodeType::View as u8);
-    ui.set_prop(grandchild, spec::prop::WIDTH, 3.3);
-    ui.set_prop(grandchild, spec::prop::HEIGHT, 4.4);
-    ui.set_prop(grandchild, spec::prop::BG_COLOR, 0xffff_eeeeu32 as f64);
-    ui.insert_before(child, grandchild, 0);
+    let root = fixed(&mut ui, spec::ROOT_ID, 70.3, 50.6);
+    set(&mut ui, root, &[(PADDING_L, 2.3), (PADDING_T, 1.3), (MARGIN_L, margin)]);
+    let child = fixed(&mut ui, root, 20.5, 15.5);
+    let grandchild = view(&mut ui, child, Some(3.3), Some(4.4));
     assert!(ui.set_layout_region(root, true));
     (ui, vec![root, child, grandchild])
 }
-fn baked() -> (RegionLayoutGuard, Vec<(i32, LayoutRect)>) {
-    let (mut source, nodes) = fixture(0.0);
-    source.draw();
-    (
-        source.layout_region_guard(nodes[0]).unwrap(),
-        nodes
-            .iter()
-            .map(|&id| {
-                let (x, y, w, h) = source.layout_of(id).unwrap();
-                (id, LayoutRect { x, y, w, h })
-            })
-            .collect(),
-    )
+
+/// The guard and rects a live solve of `scene(0.0)` produces.
+fn bake() -> (RegionLayoutGuard, Rects) {
+    let (mut ui, ids) = scene(0.0);
+    ui.draw();
+    let rect = |id: i32| {
+        let (x, y, w, h) = ui.layout_of(id).unwrap();
+        (id, LayoutRect { x, y, w, h })
+    };
+    (ui.layout_region_guard(ids[0]).unwrap(), ids.iter().map(|&id| rect(id)).collect())
 }
-fn compare(a: &mut Ui, b: &mut Ui, nodes: &[i32]) {
-    assert_eq!(a.draw().words, b.draw().words);
-    for &id in nodes {
-        assert_eq!(a.layout_of(id), b.layout_of(id));
+
+fn assert_same(live: &mut Ui, baked: &mut Ui, ids: &[i32]) {
+    assert_eq!(live.draw().words, baked.draw().words);
+    for &id in ids {
+        assert_eq!(live.layout_of(id), baked.layout_of(id));
     }
 }
 
+#[cfg(feature = "counters")]
+fn rebuilds(ui: &Ui) -> u64 {
+    ui.counters().layout.structure_rebuilds
+}
+
 #[test]
-fn baked_first_layout_skips_the_region_solver_then_mutations_solve_live() {
-    let (guard, rects) = baked();
-    let (mut live, nodes) = fixture(0.0);
-    let (mut compiled, _) = fixture(0.0);
-    assert!(compiled.set_region_layout(nodes[0], guard, &rects));
-    assert!(!compiled.set_region_layout(nodes[0], guard, &rects));
-    compare(&mut live, &mut compiled, &nodes);
+fn baked_rects_replace_the_first_region_solve_then_edits_solve_live() {
+    let (guard, rects) = bake();
+    let (mut live, ids) = scene(0.0);
+    let (mut baked, _) = scene(0.0);
+    assert!(baked.set_region_layout(ids[0], guard, &rects));
+    assert!(!baked.set_region_layout(ids[0], guard, &rects), "a pending bake cannot be replaced");
+    assert_same(&mut live, &mut baked, &ids);
     #[cfg(feature = "counters")]
     {
-        assert_eq!(live.counters().layout.structure_rebuilds, 2);
-        assert_eq!(compiled.counters().layout.structure_rebuilds, 1);
-        assert!(
-            compiled.counters().layout.taffy_nodes_created
-                < live.counters().layout.taffy_nodes_created
-        );
+        assert_eq!((rebuilds(&live), rebuilds(&baked)), (2, 1), "the baked region skipped its solver build");
+        let created = |ui: &Ui| ui.counters().layout.taffy_nodes_created;
+        assert!(created(&baked) < created(&live));
     }
-    assert!(!compiled.set_region_layout(nodes[0], guard, &rects));
-    for ui in [&mut live, &mut compiled] {
-        ui.set_prop(nodes[1], spec::prop::WIDTH, 25.25);
+    assert!(!baked.set_region_layout(ids[0], guard, &rects), "a solved region takes no bake");
+    for (id, prop, value) in [(ids[1], WIDTH, 25.25), (ids[0], MARGIN_L, 0.5)] {
+        live.set_prop(id, prop, value);
+        baked.set_prop(id, prop, value);
+        assert_same(&mut live, &mut baked, &ids);
     }
-    compare(&mut live, &mut compiled, &nodes);
-    for ui in [&mut live, &mut compiled] {
-        ui.set_prop(nodes[0], spec::prop::MARGIN_L, 0.5);
-    }
-    compare(&mut live, &mut compiled, &nodes);
 }
 
 #[test]
-fn wrong_parent_origin_or_size_falls_back_without_installing_rects() {
-    for (origin, width) in [(0.5, 70.3), (1.0, 70.3), (0.0, 80.5)] {
-        let (guard, mut rects) = baked();
-        rects[1].1.x = 999.0; // A failed guard must never publish this table.
-        let (mut live, nodes) = fixture(origin);
-        let (mut compiled, _) = fixture(origin);
-        for ui in [&mut live, &mut compiled] {
-            ui.set_prop(nodes[0], spec::prop::WIDTH, width);
-        }
-        assert!(compiled.set_region_layout(nodes[0], guard, &rects));
-        compare(&mut live, &mut compiled, &nodes);
+fn guard_mismatch_falls_back_to_a_live_solve() {
+    for (margin, width) in [(0.5, 70.3), (1.0, 70.3), (0.0, 80.5)] {
+        let (guard, mut rects) = bake();
+        rects[1].1.x = 999.0; // visible if a failed guard still installs the table
+        let (mut live, ids) = scene(margin);
+        let (mut baked, _) = scene(margin);
+        live.set_prop(ids[0], WIDTH, width);
+        baked.set_prop(ids[0], WIDTH, width);
+        assert!(baked.set_region_layout(ids[0], guard, &rects));
+        assert_same(&mut live, &mut baked, &ids);
         #[cfg(feature = "counters")]
-        assert_eq!(compiled.counters().layout.structure_rebuilds, 2);
+        assert_eq!(rebuilds(&baked), 2);
     }
 }
 
 #[test]
-fn tables_require_complete_live_nodes_integer_guard_and_no_nested_region() {
-    let (guard, rects) = baked();
-    let (mut ui, nodes) = fixture(0.0);
-    assert!(!ui.set_region_layout(nodes[0], guard, &rects[..2]));
-    let mut invalid = rects.clone();
-    invalid[1].0 = invalid[0].0;
-    assert!(!ui.set_region_layout(nodes[0], guard, &invalid));
-    invalid = rects.clone();
-    invalid[1].0 = i32::MAX;
-    assert!(!ui.set_region_layout(nodes[0], guard, &invalid));
-    invalid = rects.clone();
-    invalid[1].1.w = f32::NAN;
-    assert!(!ui.set_region_layout(nodes[0], guard, &invalid));
-    assert!(!ui.set_region_layout(
-        nodes[0],
-        RegionLayoutGuard {
-            unrounded_origin: (0.25, 0.0),
-            ..guard
-        },
-        &rects
-    ));
-    assert!(ui.set_layout_region(nodes[1], true));
-    assert!(!ui.set_region_layout(nodes[0], guard, &rects));
+fn incomplete_or_invalid_tables_are_rejected() {
+    let (guard, rects) = bake();
+    let (mut ui, ids) = scene(0.0);
+    let with = |edit: fn(&mut Rects)| {
+        let mut rects = rects.clone();
+        edit(&mut rects);
+        rects
+    };
+    assert!(!ui.set_region_layout(ids[0], guard, &rects[..2]), "missing node");
+    assert!(!ui.set_region_layout(ids[0], guard, &with(|r| r[1].0 = r[0].0)), "duplicate node");
+    assert!(!ui.set_region_layout(ids[0], guard, &with(|r| r[1].0 = i32::MAX)), "unknown node");
+    assert!(!ui.set_region_layout(ids[0], guard, &with(|r| r[1].1.w = f32::NAN)), "non-finite rect");
+    let fractional = RegionLayoutGuard { unrounded_origin: (0.25, 0.0), ..guard };
+    assert!(!ui.set_region_layout(ids[0], fractional, &rects), "non-integer origin");
+    assert!(ui.set_layout_region(ids[1], true));
+    assert!(!ui.set_region_layout(ids[0], guard, &rects), "nested region");
 }
 
 #[test]
-fn local_changes_before_first_solve_discard_pending_bake() {
-    let (guard, mut rects) = baked();
+fn edits_before_the_first_solve_discard_a_pending_bake() {
+    let (guard, mut rects) = bake();
     rects[1].1.x = 999.0;
-    let (mut live, nodes) = fixture(0.0);
-    let (mut compiled, _) = fixture(0.0);
-    assert!(compiled.set_region_layout(nodes[0], guard, &rects));
-    for ui in [&mut live, &mut compiled] {
-        ui.set_prop(nodes[1], spec::prop::HEIGHT, 22.25);
-    }
-    compare(&mut live, &mut compiled, &nodes);
+    let (mut live, ids) = scene(0.0);
+    let (mut baked, _) = scene(0.0);
+    assert!(baked.set_region_layout(ids[0], guard, &rects));
+    live.set_prop(ids[1], HEIGHT, 22.25);
+    baked.set_prop(ids[1], HEIGHT, 22.25);
+    assert_same(&mut live, &mut baked, &ids);
     #[cfg(feature = "counters")]
-    assert_eq!(compiled.counters().layout.structure_rebuilds, 2);
+    assert_eq!(rebuilds(&baked), 2);
 }
