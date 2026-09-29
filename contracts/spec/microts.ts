@@ -86,7 +86,7 @@ export const MICROTS_EXTENDED_BUILTINS: Record<string, string> = {
   clear: "export declare function clear<T>(target: T[]): void;",
   truncate: "export declare function truncate<T>(target: T[], length: N.i32): void;",
   fillRange: "export declare function fillRange<T>(target: T[], start: N.i32, end: N.i32, value: T): void;",
-  copyRange: "export declare function copyRange<T>(target: T[], targetStart: N.i32, source: readonly T[], sourceStart: N.i32, count: N.i32): void;",
+  copyRange: "export declare function copyRange<T>(target: T[], targetStart: N.i32, source: readonly T[], sourceStart: N.i32, count: N.i32, skip?: T): void;",
   codePoints: "export declare function codePoints(value: string): N.i32[];",
   fromCodePoint: "export declare function fromCodePoint(code: N.i32): string;",
   embedBytes: "export declare function embedBytes(path: string): N.u8[];",

@@ -69,7 +69,7 @@ export declare function removeAt<T>(target: T[], index: N.i32): T;
 export declare function clear<T>(target: T[]): void;
 export declare function truncate<T>(target: T[], length: N.i32): void;
 export declare function fillRange<T>(target: T[], start: N.i32, end: N.i32, value: T): void;
-export declare function copyRange<T>(target: T[], targetStart: N.i32, source: readonly T[], sourceStart: N.i32, count: N.i32): void;
+export declare function copyRange<T>(target: T[], targetStart: N.i32, source: readonly T[], sourceStart: N.i32, count: N.i32, skip?: T): void;
 export declare function codePoints(value: string): N.i32[];
 export declare function fromCodePoint(code: N.i32): string;
 export declare function embedBytes(path: string): N.u8[];

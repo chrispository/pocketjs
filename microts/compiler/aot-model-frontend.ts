@@ -450,13 +450,14 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
   /** In-place array built-ins take an assignable place as their first argument. */
   function mutation(node: ts.CallExpression, name: MutationName, expected: AotType | undefined, into: ModelStmt[]): ModelExpr {
     const arity = { push: 2, pop: 1, insert: 3, removeAt: 2, clear: 1, truncate: 2, fillRange: 4, copyRange: 5 }[name];
-    if (node.arguments.length !== arity) error(node, `${name} takes ${arity} argument${arity > 1 ? "s" : ""}`);
+    // copyRange takes an optional sixth argument: a source value it skips.
+    if (node.arguments.length !== arity && !(name === "copyRange" && node.arguments.length === 6)) error(node, `${name} takes ${arity} argument${arity > 1 ? "s" : ""}`);
     const target = owned(place(node.arguments[0]!, into), node.arguments[0]!);
     if (target.type.kind !== "array") error(node.arguments[0]!, `${name} requires an array place`);
     if (target.type.capacity !== undefined && ["push", "insert"].includes(name)) error(node, `${name} on a Cap array is outside the subset`);
     const element = target.type.element;
     if (name === "copyRange" && (!primitive(element) || element.kind === "string")) error(node.arguments[0]!, "copyRange requires numeric, boolean or enum elements");
-    const types: Record<MutationName, (AotType | undefined)[]> = { push: [element], pop: [], insert: [I32, element], removeAt: [I32], clear: [], truncate: [I32], fillRange: [I32, I32, element], copyRange: [I32, target.type, I32, I32] };
+    const types: Record<MutationName, (AotType | undefined)[]> = { push: [element], pop: [], insert: [I32, element], removeAt: [I32], clear: [], truncate: [I32], fillRange: [I32, I32, element], copyRange: [I32, target.type, I32, I32, element] };
     const args = node.arguments.slice(1).map((argument, index) => {
       const value = expr(argument, types[name][index], into);
       if (name === "copyRange" && index === 1) { if (value.type.kind !== "array" || !sameType(value.type.element, element)) error(argument, "copyRange source must have the target's element type"); return value; }

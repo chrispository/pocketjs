@@ -345,7 +345,8 @@ export class ModelInterpreter {
             if (from < 0) { count += from; to -= from; from = 0; }
             if (to < 0) { count += to; from -= to; to = 0; }
             count = Math.min(count, b.length - from, target.length - to);
-            if (count > 0) target.splice(to, count, ...b.slice(from, from + count));
+            if (count > 0 && args.length > 4) { const values = b.slice(from, from + count); values.forEach((value: Value, i: number) => { if (value !== args[4]) target[to + i] = value; }); }
+            else if (count > 0) target.splice(to, count, ...b.slice(from, from + count));
             return;
           }
         }

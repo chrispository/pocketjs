@@ -20,6 +20,11 @@ const block = (statements: RustStatement[], result?: RustExpr): RustExpr => ({ k
 const condition = (value: RustExpr, statements: RustStatement[], otherwise?: RustBlock): RustStatement => re({ kind: "if", condition: value, then: rb(statements), otherwise });
 const fn = (name: string, params: RustParam[], body: RustBlock, returns?: RustType, public_ = false): RustFunction => ({ kind: "fn", name, params, body, returns, public: public_ });
 const or = (values: RustExpr[]): RustExpr => values.reduce((a, b) => bin("||", a, b), rl(false));
+/**
+ * Windows shorter than this are copied or filled by a loop written in place;
+ * longer ones call memcpy or memset, whose word stores pay for the call.
+ */
+const SHORT_WINDOW = 16;
 const work = (kind: string): RustStatement => re(rc(rp("microts", "model", "count_work"), rp("microts", "model", "ModelWork", kind)));
 
 class ModelRust {
@@ -40,6 +45,8 @@ class ModelRust {
   continued = new Set<number>();
   loopLabels = new Map<number, { loop: string; body?: string }>();
   constants = new Map<number, ModelExpr>();
+  /** Rows `root[index]` of nested arrays borrowed as slices before the loop that reads them, by rowKey. */
+  rows = new Map<string, string>();
   constructor(readonly program: ModelProgram, readonly view?: AotProgram) {
     this.declarations = new Map(program.types.map(t => [t.name, t]));
     const walk = (value: unknown): void => {
@@ -96,6 +103,8 @@ class ModelRust {
     if (!place || !steps.length || steps[0]!.kind !== "index") return undefined;
     const statements: RustStatement[] = [];
     let value: RustExpr = place, optional = false;
+    const row = steps.length > 1 && steps[1]!.kind === "index" ? this.rows.get(this.rowKey(root, (steps[0] as { index: ModelExpr }).index)) : undefined;
+    if (row) { value = rp(row); steps.shift(); }
     for (const step of steps) {
       if (step.kind === "member") { value = optional ? rm(value, "map", { kind: "closure", params: [rn("value")], body: ref(rf(rp("value"), step.name)) }) : rf(value, step.name); continue; }
       if (step.kind !== "index") continue;
@@ -106,6 +115,62 @@ class ModelRust {
       optional = true;
     }
     return { statements, value };
+  }
+  rowKey(root: ModelExpr, index: ModelExpr): string {
+    return `${"id" in root ? root.id : ""}:${JSON.stringify(index, (key, value) => key === "loc" || key === "ledger" ? undefined : value)}`;
+  }
+  /**
+   * Borrows, before a loop, each row `root[i]` whose elements the loop reads, when
+   * the loop writes neither `root` nor anything `i` reads and calls no model
+   * function. Element reads then index a slice held in registers instead of
+   * reloading the row's header from memory that stores in the loop may alias.
+   */
+  withRows(parts: unknown[], lower: () => RustStatement[]): RustStatement[] {
+    const written = new Set<number>(), found = new Map<string, Extract<ModelExpr, { kind: "index" }>>();
+    const candidate = (row: ModelExpr | undefined) => { if (row?.kind === "index" && row.type.kind === "array" && (row.object.kind === "local" || row.object.kind === "field" || row.object.kind === "signal")) found.set(this.rowKey(row.object, row.index), row); };
+    let blocked = false;
+    const walk = (value: unknown): void => {
+      if (blocked || !value || typeof value !== "object") return;
+      if (Array.isArray(value)) { value.forEach(walk); return; }
+      const node = value as Record<string, any>;
+      switch (node.kind) {
+        case "invoke": case "call": if (this.modules.get(node.callee)?.kind !== "pure") blocked = true; break;
+        case "memo": case "set": case "external": case "start": case "await": blocked = true; break;
+        case "return": if (this.task) blocked = true; break;
+        case "let": case "for": case "forOf": written.add(node.binder.id); break;
+        case "lambda": for (const binder of node.params) written.add(binder.id); break;
+        case "assign": case "mutate": {
+          const t = node.target as ModelTarget; written.add(t.kind === "path" ? t.root.id : "id" in t ? t.id : t.owner);
+          // A row copied from is read in place like a row read by element.
+          if (node.kind === "mutate" && node.op === "copyRange") candidate(node.args[1]);
+          break;
+        }
+        case "index": candidate(node.object); break;
+      }
+      for (const [key, child] of Object.entries(value)) if (key !== "loc" && key !== "ledger" && key !== "type") walk(child);
+    };
+    walk(parts);
+    const invariant = (e: ModelExpr): boolean => {
+      switch (e.kind) {
+        case "literal": return true;
+        case "local": case "field": case "signal": return !written.has(e.id);
+        case "unary": return invariant(e.operand);
+        case "binary": return e.operator !== "??" && e.type.kind === "number" && invariant(e.left) && invariant(e.right);
+        case "cast": case "copy": return invariant(e.value);
+        case "conditional": return invariant(e.condition) && invariant(e.consequent) && invariant(e.alternate);
+        default: return false;
+      }
+    };
+    const statements: RustStatement[] = [], keys: string[] = [];
+    for (const [key, row] of blocked ? [] : found) {
+      const place = this.borrow(row.object);
+      if (this.rows.has(key) || !place || !("id" in row.object) || written.has(row.object.id) || row.index.type.kind !== "number" || !invariant(row.index)) continue;
+      const name = `row_${this.serial++}`;
+      statements.push(let_(name, rm(rm(rm(place, "get", cast(this.expr(row.index), rt("usize"))), "map", { kind: "closure", params: [rn("value")], body: rm(rp("value"), "as_slice") }), "unwrap_or", ref({ kind: "array", elements: [] }))));
+      this.rows.set(key, name);
+      keys.push(key);
+    }
+    try { return [...statements, ...lower()]; } finally { for (const key of keys) this.rows.delete(key); }
   }
   /** Type of a place below its root, following element and member steps. */
   stepType(type: AotType, step: ModelPathStep): AotType {
@@ -141,10 +206,21 @@ class ModelRust {
     const root = e.target.kind === "path" ? e.target.root.id : "id" in e.target ? e.target.id : e.target.owner;
     let source: RustExpr | undefined;
     if (e.op === "copyRange") {
+      // The source is borrowed as a slice where it can be: a stored array, a row held
+      // by the enclosing loop, or an element of another stored array.
       const value = e.args[1]!, place = this.borrow(value);
+      const element = value.type.kind === "array" ? value.type.element : value.type;
+      const slice = (borrowed: RustExpr) => { const name = `source_${this.serial++}`; statements.push(let_(name, borrowed, false, rr({ kind: "slice", element: this.type(element) }))); return rp(name); };
       const sameRoot = (value.kind === "local" || value.kind === "field") && value.id === root;
-      if (place && !sameRoot) source = ref(place);
-      else if (!(sameRoot && (e.target.kind === "local" || e.target.kind === "field"))) { const name = `source_${this.serial++}`; statements.push(let_(name, this.expr(value))); source = ref(rp(name)); }
+      let stored = value;
+      while (stored.kind === "index" || stored.kind === "member") stored = stored.object;
+      const other = (stored.kind === "local" || stored.kind === "field" || stored.kind === "signal") && stored.id !== root;
+      const row = value.kind === "index" && other ? this.rows.get(this.rowKey(value.object, value.index)) : undefined;
+      const chain = !place && !row && other ? this.readChain(value) : undefined;
+      if (row) source = rp(row);
+      else if (place && !sameRoot) source = slice(ref(place));
+      else if (chain) { statements.push(...chain.statements); source = slice({ kind: "match", value: chain.value, arms: [{ pattern: { kind: "variant", path: ["Some"], tuple: [rn("value")] }, body: rp("value") }, { pattern: { kind: "wildcard" }, body: ref({ kind: "array", elements: [] }) }] }); }
+      else if (e.args.length > 4 || !(sameRoot && (e.target.kind === "local" || e.target.kind === "field"))) { const name = `source_${this.serial++}`; statements.push(let_(name, this.expr(value))); source = slice(ref(rp(name))); }
     }
     const result = `result_${this.serial++}`, returns = e.type.kind !== "void";
     if (returns) statements.push(let_(result, this.defaultValue(e.type), true, this.type(e.type)));
@@ -159,11 +235,65 @@ class ModelRust {
         case "removeAt": return [assign(rp(result), builtin("remove_at", ref(place, true), args[0]!, { kind: "closure", params: [], body: this.defaultValue(element) }))];
         case "clear": return [re(rm(place, "clear"))];
         case "truncate": return [re(builtin("truncate", ref(place, true), args[0]!))];
-        case "fillRange": return [re(builtin("fill_range", ref(place, true), args[0]!, args[1]!, args[2]!))];
-        case "copyRange": return [re(source ? builtin("copy_range", ref(place, true), args[0]!, source, args[2]!, args[3]!) : builtin("copy_within", ref(place, true), args[2]!, args[0]!, args[3]!))];
+        case "fillRange": return this.fillWindow(place, element, args[0]!, args[1]!, args[2]!);
+        case "copyRange":
+          if (!source) return [re(builtin("copy_within", ref(place, true), args[2]!, args[0]!, args[3]!))];
+          return this.copyWindow(place, element, source, args[0]!, args[2]!, args[3]!, args[4]);
       }
     }));
     return block(statements, returns ? rp(result) : undefined);
+  }
+  /**
+   * copyRange written out in place: the clipped window becomes two slices that a
+   * loop indexes without bounds checks. A generic helper would not inline into
+   * functions built for another instruction set, and short copies would pay for
+   * the call.
+   */
+  copyWindow(place: RustExpr, element: AotType, source: RustExpr, to: RustExpr, from: RustExpr, count: RustExpr, skip?: RustExpr): RustStatement[] {
+    const id = this.serial++, name = (base: string) => `${base}_${id}`;
+    const i32 = (value: RustExpr) => cast(value, rt("i32")), usize = (value: RustExpr) => cast(value, rt("usize"));
+    const at = rp(name("to")), start = rp(name("from")), length = rp(name("count")), target = rp(name("target")), index = rp(name("index")), value = rp(name("value"));
+    const store = assign({ kind: "index", object: rp(name("window")), index }, value);
+    const window = (slice: RustExpr, first: RustExpr, mutable: boolean) => ref({ kind: "index", object: slice, index: { kind: "struct", path: ["core", "ops", "Range"], fields: [{ name: "start", value: usize(first) }, { name: "end", value: bin("+", usize(first), usize(length)) }] } }, mutable);
+    const limit = (slice: RustExpr, offset: RustExpr) => condition(bin(">", length, bin("-", i32(rm(slice, "len")), offset)), [assign(length, bin("-", i32(rm(slice, "len")), offset))]);
+    // Saturating steps keep i32 arithmetic: a window pushed past i32 range is empty either way.
+    return [
+      let_(name("to"), to, true), let_(name("from"), from, true), let_(name("count"), count, true),
+      condition(bin("<", start, rl(0)), [assign(length, rm(length, "saturating_add", start)), assign(at, rm(at, "saturating_sub", start)), assign(start, rl(0))]),
+      condition(bin("<", at, rl(0)), [assign(length, rm(length, "saturating_add", at)), assign(start, rm(start, "saturating_sub", at)), assign(at, rl(0))]),
+      let_(name("target"), ref(place, true), false, rr({ kind: "slice", element: this.type(element) }, true)),
+      limit(source, start), limit(target, at),
+      condition(bin(">", length, rl(0)), [
+        let_(name("window"), window(target, at, true)), let_(name("values"), window(source, start, false)), let_(name("index"), rl(0, "usize"), true),
+        ...this.shortLoop(skip ? undefined : bin(">=", length, rl(SHORT_WINDOW)), [re(rm(rp(name("window")), "copy_from_slice", rp(name("values"))))], { kind: "while", condition: bin("<", index, usize(length)), body: rb([
+          let_(name("value"), { kind: "index", object: rp(name("values")), index }),
+          skip ? condition(bin("!=", value, skip), [store]) : store,
+          assign(index, bin("+", index, rl(1))),
+        ]) }),
+      ]),
+    ];
+  }
+  /** A loop over a short window, or `long` (memcpy or memset) when `isLong` holds. */
+  shortLoop(isLong: RustExpr | undefined, long: RustStatement[], loop: RustStatement): RustStatement[] {
+    return isLong ? [condition(isLong, long, rb([loop]))] : [loop];
+  }
+  /** fillRange written out in place, like copyWindow. */
+  fillWindow(place: RustExpr, element: AotType, start: RustExpr, end: RustExpr, value: RustExpr): RustStatement[] {
+    const id = this.serial++, name = (base: string) => `${base}_${id}`;
+    const first = rp(name("start")), last = rp(name("end")), target = rp(name("target")), index = rp(name("index"));
+    const size = cast(rm(target, "len"), rt("i32"));
+    return [
+      let_(name("target"), ref(place, true), false, rr({ kind: "slice", element: this.type(element) }, true)),
+      let_(name("start"), start, true), let_(name("end"), end, true),
+      condition(bin("<", first, rl(0)), [assign(first, rl(0))]),
+      condition(bin(">", last, size), [assign(last, size)]),
+      condition(bin("<", first, last), [
+        let_(name("window"), ref({ kind: "index", object: target, index: { kind: "struct", path: ["core", "ops", "Range"], fields: [{ name: "start", value: cast(first, rt("usize")) }, { name: "end", value: cast(last, rt("usize")) }] } }, true)),
+        let_(name("index"), rl(0, "usize"), true),
+        ...this.shortLoop(bin(">=", bin("-", last, first), rl(SHORT_WINDOW)), [re(rm(rp(name("window")), "fill", this.copy(element) ? value : rm(value, "clone")))],
+          { kind: "while", condition: bin("<", index, rm(rp(name("window")), "len")), body: rb([assign({ kind: "index", object: rp(name("window")), index }, this.copy(element) ? value : rm(value, "clone")), assign(index, bin("+", index, rl(1)))]) }),
+      ]),
+    ];
   }
   copy(type: AotType): boolean {
     if (["number", "boolean", "style", "void", "undefined"].includes(type.kind)) return true;
@@ -369,7 +499,12 @@ class ModelRust {
       const name = `text_${this.serial++}`;
       return block([let_(name, rc({ kind: "qualifiedPath", type: this.type({ kind: "string" }, false, capacity), member: "new" }), true), re(rc(rp("microts", "model", "append_bounded_display"), ref(rp(name), true), ref(value), rl(capacityName)))], rp(name));
     }
-    if (e.name === "len") return rc(rp("microts", "builtins", "len"), ref(this.borrow(e.args[0]!) ?? args[0]!));
+    if (e.name === "len") {
+      const place = this.borrow(e.args[0]!), chain = place ? undefined : this.readChain(e.args[0]!);
+      // An element is measured in place rather than cloned first.
+      if (chain) return block(chain.statements, rm(rm(chain.value, "map", { kind: "closure", params: [rn("value")], body: rc(rp("microts", "builtins", "len"), rp("value")) }), "unwrap_or", rl(0, "i32")));
+      return rc(rp("microts", "builtins", "len"), ref(place ?? args[0]!));
+    }
     if ((MICROTS_NUMERIC_TYPES as readonly string[]).includes(e.name)) return cast(this.unwrapScalar(args[0]!, e.args[0]!.type), rt(e.name));
     if (e.name === "embedBytes") return rm({ kind: "macro", name: ["include_bytes"], args: [this.embeddedPath(e)] }, "to_vec");
     if (e.name === "codePoints") return rc(rp("microts", "builtins", "code_points"), ref(args[0]!));
@@ -451,17 +586,17 @@ class ModelRust {
       }
       case "if": return [condition(this.expr(s.condition), this.statements(s.then), s.else ? rb(this.statements(s.else)) : undefined)];
       case "untrack": case "batch": return [re(block(this.statements(s.body)))];
-      case "for": {
+      case "for": return this.withRows([s], () => {
         const bound = `bound_${this.serial++}`, index = this.name(s.binder.id);
         const body = this.loopBody(s.loop, s.body, true);
         return [let_(index, s.start ? this.expr(s.start) : rl(0, "i32"), true), let_(bound, this.expr(s.bound)), { kind: "while", condition: bin(s.inclusive ? "<=" : "<", rp(index), rp(bound)), label: body.label, body: rb([work("LoopIteration"), ...body.statements, ...(s.inclusive ? [condition(bin("==", rp(index), rp(bound)), [{ kind: "break" }])] : []), assign(rp(index), rm(rp(index), "wrapping_add", rl(1)))]) }];
-      }
-      case "forOf": { const body = this.loopBody(s.loop, s.body, false); return [{ kind: "for", pattern: rn(this.name(s.binder.id)), iterable: this.expr(s.source), label: body.label, body: rb([work("LoopIteration"), ...body.statements]) }]; }
-      case "while": {
+      });
+      case "forOf": return this.withRows([s], () => { const body = this.loopBody(s.loop, s.body, false); return [{ kind: "for", pattern: rn(this.name(s.binder.id)), iterable: this.expr(s.source), label: body.label, body: rb([work("LoopIteration"), ...body.statements]) }]; });
+      case "while": return this.withRows([s], () => {
         const body = this.loopBody(s.loop, s.body, !!s.update || !!s.post), update = s.update ? this.statements(s.update) : [];
         if (s.post) return [{ kind: "loop", label: body.label, body: rb([work("LoopIteration"), ...body.statements, condition({ kind: "unary", operator: "!", expr: this.expr(s.condition) }, [{ kind: "break" }])]) }];
         return [{ kind: "while", condition: this.expr(s.condition), label: body.label, body: rb([work("LoopIteration"), ...body.statements, ...update]) }];
-      }
+      });
       case "break": return [{ kind: "break", label: this.loopLabels.get(s.loop)!.loop }];
       case "continue": { const labels = this.loopLabels.get(s.loop)!; return [labels.body ? { kind: "break", label: labels.body } : { kind: "continue", label: labels.loop }]; }
       case "switch": {

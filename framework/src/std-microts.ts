@@ -139,12 +139,15 @@ export function truncate<T>(target: T[], length: i32): void { if (length >= 0 &&
 export function fillRange<T>(target: T[], start: i32, end: i32, value: T): void {
   for (let i = Math.max(0, start); i < Math.min(end, target.length); i++) target[i] = value;
 }
-export function copyRange<T>(target: T[], targetStart: i32, source: readonly T[], sourceStart: i32, count: i32): void {
+export function copyRange<T>(target: T[], targetStart: i32, source: readonly T[], sourceStart: i32, count: i32, ...skip: [T?]): void {
   let n = count, from = sourceStart, to = targetStart;
   if (from < 0) { n += from; to -= from; from = 0; }
   if (to < 0) { n += to; from -= to; to = 0; }
   n = Math.min(n, source.length - from, target.length - to);
-  if (n > 0) target.splice(to, n, ...source.slice(from, from + n));
+  if (n <= 0) return;
+  const values = source.slice(from, from + n);
+  if (skip.length) values.forEach((value, i) => { if (value !== skip[0]) target[to + i] = value; });
+  else target.splice(to, n, ...values);
 }
 export function codePoints(value: string): i32[] { return Array.from(value, c => c.codePointAt(0)!); }
 export function fromCodePoint(code: i32): string { return code >= 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff) ? String.fromCodePoint(code) : "\ufffd"; }
