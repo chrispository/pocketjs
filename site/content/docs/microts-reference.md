@@ -336,7 +336,6 @@ modules. Demo `gen/` directories are ignored by Git. Run `build` before Cargo.
 | `--strict` | Reject unannotated `number` in contracts |
 | `build --out <directory>` | Choose the generated output directory |
 | `build --no-format` | Skip `rustfmt`; the default uses it when installed |
-| `build --specialize <mode>` | Select `on` or `off` for native specialization; defaults to `on` |
 | `check --report specialization` | Report binding dependencies, resolved property candidates, and layout-region criteria |
 | `build/check --ir <file>` | Save View IR; compiled mode also writes a sibling `.model.json` with Model IR |
 | `check --json` | Print analysis and requested board results as JSON; with `--report specialization`, print the specialization report |
@@ -359,17 +358,16 @@ compiles and packages the application.
 
 ## Native build options
 
-Native builds enable specialization by default. Use separate output directories
-when comparing generated source:
+**Native compiler optimizations are enabled by default.** Build an application
+with:
 
 ```sh
-bun microts/compiler/cli.ts build sensor-list --specialize on
-bun microts/compiler/cli.ts build sensor-list --specialize off --out .pocket-build/sensor-reference
+bun microts/compiler/cli.ts build sensor-list
 ```
 
-**Specialization does not change View IR, Model IR, source admission, or guest
-compilation.** `--specialize off` disables native compiler specialization; the
-core's general incremental layout remains enabled in both builds.
+These optimizations preserve View IR, Model IR, source admission, and guest
+compilation. The shared core also synchronizes layout changes into its existing
+tree; this runtime behavior does not require compiler-generated layout regions.
 
 Host build scripts use the options to
 [`buildAot`](https://github.com/pocket-stack/pocketjs/blob/main/microts/compiler/aot-build.ts)
@@ -377,7 +375,6 @@ for environment-dependent reuse. These options apply to both Vue and Solid:
 
 | Option | Value and default |
 |---|---|
-| `specialize` | `"on"` or `"off"`; default `"on"` |
 | `specializationEnvironment` | `{ viewport: [width, height], tickRate, fontAtlases?: [{ slot, bytes }], fontSlots?: [...] }` |
 | `specializationTarget` | Request layout, text-size, and static draw-table baking for a supported target; omitted means no build-time baking |
 | `specializationShapeCacheBytes` | Nonnegative integer byte budget for the generated text-size cache; default 32 KiB |
@@ -564,7 +561,8 @@ comparison. Aborted or uncommitted plans do not advance the tracker's baseline.
 ## Work counters
 
 The `counters` Cargo feature in `microts` forwards to `pocketjs-core`.
-**Counters are off by default, and specialization does not depend on them.**
+**Counters are off by default, and native compiler optimizations do not depend
+on them.**
 Feature-disabled builds contain no counter storage or increments.
 
 Enable the feature on the application's `microts` dependency. For an
@@ -612,8 +610,9 @@ is not called by normal application frames or enabled by specialization.
 
 ## Compare native builds
 
-The native differential harness compiles specialization off and on, supplies
-shared font assets, and runs the same input recording through both programs.
+The native differential harness builds reference and optimized versions of an
+application, supplies shared font assets, and runs the same input recording
+through both programs. The harness selects the comparison modes.
 The `sensor-list` fixture uses simulated sensors and needs no device hardware.
 From the repository root:
 
@@ -677,7 +676,7 @@ damage comparison.
 For custom fixtures,
 [`executeSpecialization`](https://github.com/pocket-stack/pocketjs/blob/main/microts/compiler/specialization-harness.ts)
 accepts `tape`, `release`, `propsExpression`, and `specializationTarget` options.
-The target option enables supported baking in the on build. `modelSource`
+The target option enables supported baking in the optimized build. `modelSource`
 and `modelExpression` supply a handwritten Rust model for a fixture without a
 compiled model.
 

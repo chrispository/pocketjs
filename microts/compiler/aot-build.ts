@@ -23,7 +23,7 @@ export interface AotBuildOptions {
   format?: boolean;
   ir?: string;
   board?: string;
-  /** Native-only optimization. Analysis and serialized IR are unchanged. */
+  /** Internal comparison override; native optimizations are enabled by default. */
   specialize?: "on" | "off";
   /** Register logical node identities in a runtime built with `harness`. */
   harness?: boolean;
@@ -161,6 +161,7 @@ export async function runAotCli(args: string[]): Promise<void> {
     else if (arg === "--json") json = true;
     else if (arg === "--no-format") format = false;
     else if (arg === "--boards") boards = true;
+    // Internal differential/debugging switch; omitted from public CLI help.
     else if (arg === "--specialize" || arg.startsWith("--specialize=")) {
       const value = arg === "--specialize" ? args[++i] : arg.slice(13);
       if (value !== "on" && value !== "off") throw new Error("MicroTS: --specialize expects on or off");

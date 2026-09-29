@@ -422,11 +422,11 @@ own repository and workflow for GB, NES and GBA.
 
 ## Native updates and rendering
 
-**Native builds enable specialization by default.** The compiler uses facts
-about constants and model dependencies to remove repeated binding work. Some
+**Native compiler optimizations are enabled by default.** The compiler uses
+facts about constants and model dependencies to remove repeated binding work. Some
 layout and drawing optimizations also require the host's asset bytes and
-environment. Use `build --specialize off` for a comparison build. Both modes
-use the same View IR, Model IR, admission rules and shared UI core.
+environment. These optimizations preserve View IR, Model IR, admission rules
+and guest compilation.
 
 ### Binding evaluation
 
@@ -455,10 +455,10 @@ layout region cannot use an optimization.
 ### Incremental layout
 
 **The shared core synchronizes changes into its existing Taffy layout tree.**
-This applies to primary and auxiliary outputs, including builds with
-specialization disabled. Existing nodes keep generation-checked layout
-handles. Insertion creates the required layout nodes; removal and reordering
-change child lists. Destroyed nodes release their handles and measurement
+This applies to primary and auxiliary outputs in the shared runtime.
+Existing nodes keep generation-checked layout handles. Insertion creates the
+required layout nodes; removal and reordering change child lists. Destroyed
+nodes release their handles and measurement
 contexts before a reused UI slot can supply a different node.
 
 A Text element owns one measured leaf for its concatenated inline run; an
@@ -521,8 +521,9 @@ requires the host to consume the damage plan.
 
 ## Measure native work
 
-Use the report to inspect the compiler's decisions and the native differential
-harness to compare the same app with specialization off and on:
+Use the report to inspect the compiler's decisions. The native differential
+harness builds reference and optimized versions of the same app and compares
+their behavior:
 
 ```sh
 bun microts/compiler/cli.ts check sensor-list --report specialization
