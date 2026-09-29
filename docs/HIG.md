@@ -137,49 +137,33 @@ control surface. Every intent renders there as a tile, and the pad's
 buttons keep their §2 meaning at the same time, so a `ClassicSelection`
 wash on the bottom list follows both the tap and the d-pad.
 
-## 4. The system layer
+## 4. System controls
 
-Only one guest runs at a time on a console, so "background" is a design,
-not a process state. The launcher (`docs/LAUNCHER.md`) switches whole
-guests behind the veil with a frozen shot of the outgoing application. The
-system layer completes that into a switcher, per modality:
+**Launcher switching destroys the outgoing guest and mounts the selected app
+from scratch.** The frozen outgoing image remains available to the launcher;
+it does not preserve application state. See [LAUNCHER.md](LAUNCHER.md) for the
+host-owned SELECT interception used by multi-app hosts.
 
-| Modality | Home / switcher | System sheet |
-| --- | --- | --- |
-| buttons | hold SELECT 400 ms | SELECT + START |
-| touch | the hardware Home button where one exists; else a two-finger swipe from the bottom edge | long-press Home; else the sheet's own control on the launcher |
+`installSystemLayer()` from `@pocketjs/framework/system` provides a guest-side
+sheet with application identity, status, registered actions and a Close row.
+On hosts that deliver SELECT to the guest, holding it for 400 ms of virtual
+time opens the sheet. Applications can also call the returned `open()` method.
+Touch controls should invoke that method from an explicit system control.
 
-**A guest never sees a system chord.** The host samples the pad, matches
-the reserved chords, and delivers the remaining mask through
-`globalThis.frame`. This is the one place the model departs from
-"everything a guest can observe is a surface op": a chord the guest cannot
-observe needs no op, and every host implements the same table (proposed for
-`contracts/spec/spec.ts` as data).
+The launcher host can consume SELECT before it reaches the guest. The
+framework does not expose a universal host chord table or an `app.state`
+suspend/restore capability. Applications that need persistence must use an
+admitted storage capability.
 
-**Switching is relaunch with restored state.** Two capabilities make it
-read as a background switch:
+## 5. Framework APIs
 
-1. `app.state`: a per-application key-value store the guest writes on
-   `onSuspend` and reads on mount (`docs/PLATFORM.md` reserves it), so the
-   search query, the scroll position and the playing video's position
-   survive.
-2. `frozenShot`: the outgoing frame stays on screen through the eval, and
-   the incoming guest's first frame replaces it.
-
-The launcher's deck orders cards by last use, so Home then `confirm`
-returns to the previous application: that is Recents.
-
-## 5. What exists and what this document asks for
-
-| Piece | State |
+| Feature | API or contract |
 | --- | --- |
-| `app.modality` and `presentations[].modality` admission | shipped (`framework/src/manifest/resolve.ts`) |
-| `glyph()` per-device button names | shipped (`@pocketjs/framework/modality`) |
-| `ClassicSelection`, `ClassicButton`, `ClassicSheet` | shipped (`@pocketjs/framework/classic`) |
-| Modality-driven keyboard with focus memory | shipped (`@pocketjs/framework/osk`) |
-| Launcher veil, frozen shot, whole-guest switch | shipped (`docs/LAUNCHER.md`) |
-| `useActions` intents and the generated legend | shipped (`@pocketjs/framework/actions`); touch tiles read `entries()` by hand |
-| `ClassicBar`, `ClassicFooter`, `ClassicList`, `ClassicSpinner` | shipped (`@pocketjs/framework/classic`) |
-| System sheet on hold-SELECT | shipped in its guest-side form (`@pocketjs/framework/system`); the host-owned chord table stays proposed |
-| Native coverage and indexed-image uploads | shipped on the 3DS and the PSP (`offload.uploadCoverage`, `offload.uploadIndexedImage`), so one row component renders on both |
-| `app.state` suspend/restore | proposed; `docs/PLATFORM.md` names it as a later capability |
+| Modality admission | `app.modality`, `presentations[].modality`, `framework/src/manifest/resolve.ts` |
+| Per-device button names | `glyph()` from `@pocketjs/framework/modality` |
+| Selection, buttons, sheets, bars, lists and spinners | `@pocketjs/framework/classic` |
+| Keyboard and focus memory | `@pocketjs/framework/osk` |
+| Whole-guest switching and frozen images | `@pocketjs/framework/launcher` |
+| Intent bindings and legends | `useActions` from `@pocketjs/framework/actions`; touch controls read `entries()` |
+| Guest-side system sheet | `@pocketjs/framework/system` |
+| Coverage and indexed-image uploads on PSP and 3DS | `offload.uploadCoverage`, `offload.uploadIndexedImage` |

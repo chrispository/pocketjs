@@ -375,7 +375,7 @@ Not supported v1 (loud compile/dev errors, not silent): `classList`, template-
 interpolated class fragments, `hover:`. Dynamic styling = ternaries of full
 literals, `style={{…}}` objects, or `animate()`.
 
-## Testing (definition of done)
+## Tests
 
 1. `contract.ts` — regen spec.rs in-memory + byte-compare; constants greps.
 2. `golden.ts` — headless Bun + wasm rasterizer; fixed dt; scripted input;
@@ -399,15 +399,13 @@ animations relayout that frame (prefer transforms); Solid effects only on
 interaction. Boot: unminified but tree-shaken bundle; all binary assets in the
 pak (base64-in-JS is the known QuickJS boot killer).
 
-## What v1 explicitly punts
+## Support boundaries
 
-Kinetic scroll views, CLUT/swizzled textures, render-to-texture opacity groups
-(per-vertex alpha propagation instead — wrong on overlap, fine for demos),
-kerning, `hover:`, percentage sizes beyond `-full`, Android hosts,
-`rounded-full` on runtime-sized nodes.
+**Supported features depend on the resolved host profile.** Check its declared
+capabilities and the [render backend contract](BACKENDS.md) before selecting
+text, input or asset APIs. The baked scalar text path does not provide kerning.
+Per-vertex opacity propagation does not create an isolated opacity group, so
+overlapping descendants can blend more than once.
 
-The 3DS left this list with `hosts/3ds` — a QuickJS guest over a PICA200
-backend. **The CIA boots and renders on a New 3DS LL.** The `3ds-dev` profile
-in `tools/3ds-profile.ts` stays outside the production registry until its
-synthesized-cursor, sprite, streamed-texture and large-atlas paths have direct
-coverage.
+The 3DS host uses QuickJS and a PICA200 backend. Its private `3ds-dev` profile
+lives in `tools/3ds-profile.ts`; admission follows that profile’s capabilities.

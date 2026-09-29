@@ -9,9 +9,9 @@ Source: [NotoSansCJKjp-Regular.otf](https://github.com/notofonts/noto-cjk/blob/f
 at commit `f8d157532fbfaeda587e826d4cd5b21a49186f7c`.
 Source SHA-256: `68a3fc98800b2a27b371f2fb79991daf3633bd89309d4ffaa6946fd587f375b5`.
 
-The subset contains the historical runtime-metadata fixture characters and ranges
-U+3000–30FF, U+4E00–4EFF and U+FF61–FF9F that the source font covers. The downstream
-player regression adds U+FF11 (１), U+FF21 (Ａ) and U+20BB7 (𠮷). It retains
+The subset contains the runtime-metadata fixture characters and ranges
+U+3000–30FF, U+4E00–4EFF and U+FF61–FF9F that the source font covers. It also
+includes U+FF11 (１), U+FF21 (Ａ) and U+20BB7 (𠮷). It retains
 OpenType layout tables and names. It provides one Japanese font rendition;
 it does not select regional Han glyph variants by language.
 

@@ -1,56 +1,24 @@
-# The PocketJS runtime family — an extension architecture
+# Runtime composition
 
-*How PocketJS grows from "a JSX UI engine for the PSP" into a family of small,
-specialized engines that are all freely programmable from JavaScript — without
-becoming a general-purpose engine.*
+This document defines native-core and guest-interface ownership for the 2D UI
+runtime (`engine/core/` and its hosts), the 3D libraries (`engine/pocket3d/`)
+and game hosts such as [OpenStrike](https://github.com/pocket-stack/open-strike).
 
-This document is normative for every runtime in the Pocket stack: the existing
-2D UI runtime (`engine/core/` + PSP/wasm/wgpu hosts), the 3D substrate (`engine/pocket3d/`),
-and every game runtime built on them (the first one is
-[OpenStrike](https://github.com/pocket-stack/open-strike)).
+## 1. Runtime composition
 
-## 1. The thesis
+**A runtime combines native cores, declared guest interfaces and one guest
+program.** Each core owns a specific subsystem, such as retained UI, physics
+or audio. A surface exposes that subsystem through versioned operations,
+events and asset formats. The guest combines the mounted surfaces through their
+SDKs.
 
-Roblox demonstrated that the most valuable property of a game platform is not
-engine breadth — it is that **the unit of creation is a script, not an engine
-build**. Creators act on a curated world-vocabulary (the DataModel) from a
-safe, embedded language, and never touch the native layer.
+A UI runtime exposes nodes, styles, layout and focus. An FPS runtime exposes
+rounds, weapons, hits and bots. These interfaces can differ while sharing guest
+hosting, transport, rendering and resource code.
 
-Roblox pays for this with one universal DataModel: every experience, whatever
-its genre, inherits the same giant ontology, and the engine must be
-everything to everyone. That is exactly the "Unreal-shaped" cost PocketJS
-refuses.
+## 2. Components and ownership
 
-The PocketJS bet is the dual of Roblox's:
-
-> **Don't share a world-ontology. Share the *grammar* for defining
-> world-ontologies.**
-
-Each domain gets its own deliberately small engine — a *specialized runtime* —
-that declares its own closed vocabulary: the nouns and verbs of that domain
-and nothing else. A 2D UI runtime speaks nodes, styles, layout, focus. An FPS
-runtime speaks rounds, weapons, hits, bots. A future puzzle or rhythm runtime
-would speak boards or beats. What the platform standardizes is not the
-vocabulary but the **mechanism** by which any such vocabulary is:
-
-1. implemented natively, once, for performance (Rust),
-2. exposed to JavaScript wholesale, for freedom (QuickJS),
-3. composed with other vocabularies in one program.
-
-Under this architecture the difference between an "app" and a "game" — or
-between a "game" and a "mod" — is not architectural. All of them are the same
-kind of artifact: **guest programs customizing native cores through declared
-vocabularies**. That is the sense in which the App/Game boundary dissolves.
-
-## 2. The ontology
-
-A **runtime** is a triple:
-
-```
-Runtime = ⟨ Cores, Surfaces, Guest ⟩
-```
-
-### Core (Rust) — where state and time live
+### Core (Rust) — state and time
 
 A core is a native simulation that owns its domain state and its clock:
 `pocketjs-core` owns the retained UI tree, taffy layout, animation tracks and
@@ -86,8 +54,7 @@ never renumbered, never reused.
 
 **Capability = surface.** A guest can affect exactly what its mounted
 surfaces express — nothing else. There is no ambient filesystem, network, or
-process access. Sandboxing is not a bolted-on policy; it falls out of the
-ontology. This is what makes third-party mods a tractable idea.
+process access. The host controls access by choosing which surfaces it mounts.
 
 ### Guest (QuickJS) — where products live
 
@@ -97,27 +64,25 @@ surfaces they were given. QuickJS because it is embeddable everywhere Pocket
 targets (it already runs on a 333 MHz PSP), deterministic, small, and fast
 enough when the boundary is designed correctly (see the laws below).
 
-### SDK — the idiomatic algebra per domain
+### SDK — application-facing APIs
 
-Raw surfaces are wire protocols. Each surface ships an SDK that expresses it
-in the *algebra natural to its domain*:
+Raw surfaces are wire protocols. Their SDKs provide APIs suited to the
+subsystem:
 
-- The `ui` surface's natural algebra is a reactive tree → its SDK is **JSX**
+- The `ui` surface uses a reactive tree; its SDK provides **JSX**
   (Solid, Vue Vapor or Octane through the universal renderer, Tailwind
   classes, `animate()`).
-- An FPS's natural algebra is rules and policies over events → its SDK is a
+- An FPS surface uses event handlers and configuration through a
   **mod API**: `strike.on("kill", …)`, `strike.rules.roundTime = 90`,
   weapon/bot config tables.
 - Other genres choose their own: data tables, state machines, timelines.
 
-Choosing the SDK shape per domain — instead of forcing one paradigm — is the
-"many small engines" philosophy applied to the API layer.
+The SDK must preserve the underlying surface’s operations and ownership
+boundaries.
 
 ## 3. The three laws
 
-Every runtime obeys these; they are what keeps "freely scriptable" compatible
-with "high performance". All three are generalizations of mechanisms the PSP
-UI runtime already proved on 333 MHz hardware.
+Runtime interfaces follow these ownership and scheduling rules.
 
 **Law 1 — State lives in cores; guests hold mirrors.**
 Guest-side reads never cross the boundary in hot paths. The Solid renderer
@@ -136,12 +101,12 @@ The host calls the guest exactly once per fixed-step tick
 (`frame(buttons)` for UI runtimes; game runtimes add their event pump in the
 same turn). The guest never owns a timer or a thread. Frame content is a pure
 function of tick index + inputs, which is what makes byte-exact goldens,
-headless acceptance scripts, and deterministic replays possible — the whole
-Pocket verification story rests on this law.
+headless tests and deterministic replay possible for a fixed build and
+resource set.
 
 ## 4. The mechanism crates
 
-The grammar is implemented once, as infrastructure every runtime reuses:
+The shared crates provide guest hosting, rendering and platform adapters:
 
 | Crate | Role |
 | --- | --- |
@@ -149,7 +114,7 @@ The grammar is implemented once, as infrastructure every runtime reuses:
 | `pocket-net` | Transport-neutral NET core and `globalThis.net` surface: validates bounded HTTP requests, owns handles/bodies and tick event batches, and accepts a host-owned `HttpTransport` adapter. See [NET.md](./NET.md). |
 | `pocket-ui-wgpu` | The `ui` surface, desktop edition: feeds paks to `pocketjs-core`, exposes the 17 `HostOps` ops to the guest, renders the DrawList through wgpu into any render target — a window (standalone app host) or an overlay pass over a 3D scene (game HUD). |
 | `pocket-widget` | The desktop-widget capability (WIDGET.md): a widget window shell whose guest ticks at a fixed rate while GPU frames render on demand, embedded `ui` surfaces bound onto meshes, and cursor-ray part picking mapped to declared inputs. `pocket-stage` is the first runtime on it; its bundled PSP stage runs admitted fixed-viewport apps unmodified. |
-| `pocketjs-core` | The 2D UI core (unchanged; now viewport-parameterized). |
+| `pocketjs-core` | The 2D UI core with a host-selected viewport. |
 | `pocket3d` | Native substrate, desktop edition: wgpu bootstrap, forward renderer, glTF models, headless capture. |
 | `pocket3d-bsp` | The portable half of the 3D substrate (no_std + alloc): GoldSrc maps, hull collision, the character controller, PVS visibility, and the cooked `.p3d` world format. Runs identically under wgpu and on the PSP. |
 | `pocket3d-gu` | The 3D substrate, PSP edition: renders cooked worlds through the GE (sceGu) with PVS culling, CLUT8 textures, and dynamic meshes. |
@@ -171,28 +136,23 @@ product bundle (JS, built by the PocketJS two-pass pipeline)
   + HUD app       (ui SDK: Solid JSX, Tailwind, animations)
 ```
 
-The PSP UI runtime, in the same notation: a QuickJS guest + the `ui` surface
-+ the sceGu backend. It was the first instance of the pattern all along; the
-architecture names it and makes it repeatable.
+The PSP UI runtime combines a QuickJS guest, the `ui` surface and the sceGu
+backend.
 
 [Pocket Voxel](https://github.com/pocket-stack/pocket-voxel) inverts the
 ownership split the other instances share: the GAME STATE lives in the
 QuickJS guest (a TypeScript port of a Game Boy RPG engine) and the Rust core
 owns only the retained diorama scene — cooked voxel chunks, billboards,
 camera rungs, a GB UI tile layer — behind its own `voxel` surface, next to
-the mounted `audio` module. It incubated in this repo and now lives in its
-own repository, vendoring this engine the way OpenStrike does.
+the mounted `audio` module. It vendors this engine from its own repository.
 
-And the composition is now proven portable: **OpenStrike runs on a real PSP**
-as `openstrike-core` (the same FPS simulation) + `pocket3d-gu` over a cooked
+**The PSP OpenStrike host combines** `openstrike-core` (the same FPS simulation) + `pocket3d-gu` over a cooked
 map + the `pocketjs-psp` host library + the same `strike` surface mounted
-through the raw QuickJS API — executing the identical product bundle (rules
-mod + JSX HUD) that the desktop runs, at 60 fps on the handheld.
+through the raw QuickJS API. It executes the same rules and JSX HUD bundle as
+the desktop host.
 
-Note what composition buys: the HUD is not "game UI code" — it is a full
-PocketJS app, running unmodified on the same framework that drives PSP
-hardware, mounted *inside* a game runtime. Any future runtime gets a
-production UI layer for free by mounting `ui`.
+The HUD uses the PocketJS UI framework inside the game runtime. Mounting `ui`
+provides that framework’s layout, input and rendering interfaces.
 
 ## 5. Discipline for new runtimes
 
@@ -205,14 +165,13 @@ To add a runtime for a new domain:
 2. **Build the core against the spec**, on whatever substrate fits
    (`pocket3d`, `pocketjs-core`, neither).
 3. **Mount surfaces with `pocket-mod`**, obeying the three laws.
-4. **Ship the SDK** in the domain's natural algebra, plus a headless
-   verification harness (scripted input, deterministic RNG, screenshot/state
-   assertions) — a runtime without a headless story is not done.
+4. **Provide an SDK and headless tests** with scripted input, deterministic
+   randomness and screenshot or state assertions.
 5. **Let the base game be the first mod.** If the built-in behavior can't be
    expressed through the surface, the surface is too weak — fix the surface,
    not the game. (OpenStrike's round rules, scoring and weapon tables are JS
    for exactly this reason.)
 
-What stays out of scope, permanently: a universal scene graph, a universal
-editor, cross-runtime portability of *game* code. Vocabularies are allowed —
-encouraged — to be incompatible. The grammar is the platform.
+The shared runtime interfaces do not require a universal scene graph or
+editor. Game code depends on the surfaces it uses and need not be portable to
+a runtime that exposes different operations.

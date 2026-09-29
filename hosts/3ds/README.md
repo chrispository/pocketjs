@@ -8,10 +8,9 @@ bottom screen**, both at rasterDensity 1 and presentation `native`, under the
 out-of-registry `3ds-dev` profile in `tools/3ds-profile.ts`. The resistive
 panel reports contacts through `input.touch.auxiliary`.
 
-**The CIA boots and renders the calibration app on a New 3DS LL.** The profile
-remains out of the production registry because the current hardware and golden
-suite does not directly exercise the synthesized cursor, sprites, streamed
-textures or a large font atlas.
+**The `3ds-dev` profile is outside the production registry.** Hardware and
+golden coverage does not include the synthesized cursor, sprites, streamed
+textures, or a large font atlas.
 
 `hosts/psp` puts its GPU backend in Rust because the `psp` crate has bindings
 for the GE. citro3d is a C library of mostly `static inline` functions, so here
@@ -334,8 +333,8 @@ title/00040000/0ffc1900/content/0429b6bc.app"
 
 `00040000` is the application category and `0ffc1900` is this demo's unique id
 shifted up by its 8-bit variation; `tools/3ds.ts` prints the whole title id when
-it writes the file. A capture build installed and booted this way produced
-frames **byte-identical to the `.3dsx` goldens** in `tests/goldens/3ds/`.
+it writes the file. Capture builds use the same frame format as the `.3dsx`
+goldens in `tests/goldens/3ds/`.
 
 ## What `globalThis.ui` has to publish
 
@@ -413,14 +412,9 @@ B, G, R into the A, B, G, R capture word itself.** Asking the transfer engine
 for a 32-bit linear output out of this 240x400 tiled colour buffer returns rows
 that are each individually correct and progressively misregistered — every
 fourth output row slips a further 64 texels — while the same frame presents
-perfectly on the screen. Azahar's software rasterizer answers the 32-bit request
-correctly, so the wrong format is invisible until something renders through a
-GPU: the identical build and the identical CIA both came back shredded under
-Vulkan. Measured in the Pocket Voxel host against a known probe rectangle,
-RGBA8 out matched 74.6% of it and RGB8 out matched 100.0%. RGB8 is also the
-format citro3d's own presentation transfer uses, so the capture travels the path
-the screen travels; the alpha byte it drops was never read, because the decode
-takes R, G and B only.
+on the screen. Azahar's software rasterizer does not reproduce that GPU
+readback error. RGB8 is also the format used by citro3d's presentation
+transfer. The capture decoder uses R, G, and B and supplies the alpha byte.
 
 ```sh
 bun tests/e2e/azahar.ts
@@ -444,7 +438,7 @@ part of it, so a run gets its own config and SD card by getting its own `$HOME`.
 `input.touch` is deliberately absent from the profile. The touchscreen belongs
 to the **bottom auxiliary surface**, so it is exposed only as
 `input.touch.auxiliary`; contacts are never remapped into the top screen's
-coordinate space. `audio.pcm` is not implemented in v1.
+coordinate space. The host does not provide `audio.pcm`.
 
 The New 3DS C-stick is exposed as the optional right analog lane. Applications
 read `rightAnalogX()` / `rightAnalogY()` from the framework lifecycle API, using

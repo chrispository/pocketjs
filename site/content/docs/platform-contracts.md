@@ -320,24 +320,24 @@ core masks, and target-selected image variants use that many raster samples per
 logical pixel. Dynamic texture producers receive the same resolved value as
 `platform.pixelRatio`; neither compiler nor application needs a Vita branch.
 
-### Transitional dev targets
+### Host-specific profiles
 
-`hosts/` holds more host directories than the registry holds targets. A host
-still working toward its acceptance receipt keeps its profile in its own module
-under `tools/`, builds through its own command, and stays out of
-`POCKET_TARGETS`:
+**The following development profiles are outside `POCKET_TARGETS`.** Each
+profile lives in a module under `tools/` and is selected by its host's command.
+Use that command with the host's device toolchain; these ids are unavailable
+to the stock target resolver.
 
-| Target id                | Command                      | What holds it out |
-| ------------------------ | ---------------------------- | ----------------- |
-| `3ds-dev`                | `bun run 3ds`                | the host suite leaves the cursor, sprite, streamed-texture and large-atlas paths uncovered |
-| `ios-dev`                | `bun run ios`                | the Apple host has no device acceptance suite yet |
-| `iphone2g-dev`           | `bun run iphone2g`           | the iPhone OS 3.1.3 host has not passed the hardware suite |
-| `iphone4s-dev`           | `bun run iphone4s`           | a private exact-device profile (iOS 6.1.3) |
-| `ipodtouch-dev`          | `bun run ipodtouch`          | no repeatable build, deploy, launch, frame and touch receipt yet |
-| `ipodtouch4-dev`         | `bun run ipodtouch4`         | a private exact-device profile (iOS 6.1.6; the 4S display tuple and ABI) |
-| `symbian-e7-dev`         | `bun run symbian`            | the E7 host has not passed the hardware acceptance suite |
-| `meizu-m8-dev`           | `bun run meizu-m8`           | the Windows CE 6 acceptance receipt has not passed |
-| `blackberry-qnx-dev`     | `bun run blackberry-qnx`     | a private exact-device profile (Classic SQC100, Core Native) |
+| Target id | Command | Profile |
+| --- | --- | --- |
+| `3ds-dev` | `bun run 3ds` | Nintendo 3DS: 400×240 primary and 320×240 auxiliary displays; touch belongs to the auxiliary display |
+| `ios-dev` | `bun run ios` | Embedded `PocketSurfaceView`: fixed 480×272 logical viewport with raster density 1–4 |
+| `iphone2g-dev` | `bun run iphone2g` | iPhone OS 3.1.3: 320×480 touch display at density 1 |
+| `iphone4s-dev` | `bun run iphone4s` | iPhone 4S, iOS 6.1.3: 320×480 logical viewport at density 2 |
+| `ipodtouch-dev` | `bun run ipodtouch` | iPod touch 6: 320×568 logical viewport at density 2 |
+| `ipodtouch4-dev` | `bun run ipodtouch4` | iPod touch 4, iOS 6.1.6: 320×480 or 480×320 logical viewport at density 2; shares host ABI 8 with the iPhone 4S |
+| `symbian-e7-dev` | `bun run symbian` | Nokia E7: dynamic Qt viewport with touch and buttons, density 1 |
+| `meizu-m8-dev` | `bun run meizu-m8` | Meizu M8/M8SE, Windows CE 6: 480×720 touch display at density 1 |
+| `blackberry-qnx-dev` | `bun run blackberry-qnx` | BlackBerry Classic: 360×360 logical viewport at density 2, with buttons and touch |
 
 Each module builds its own `definePlatformContractRegistry` and passes it to
 `validateAndResolveBuildPlan`, so the resolver, compiler, and plan format are
@@ -437,14 +437,11 @@ const targetBackends = {
 await targetBackends[target as PocketTargetId](context);
 ```
 
-**That table holds three of the seven registered targets.** The desktop targets
-build through their own tools instead — `macos-app` through `tools/macos.ts`,
-`macos-widget` through `tools/note.ts` and `tools/widget.ts` — and `linux-app`
-and `web-app` have no `pocket build` path today: the plan resolves and then the
-index throws a TypeError on an undefined backend. The table carries a
-`satisfies Record<PocketTargetId, TargetBackend>` annotation it does not meet,
-and `tools/` sits outside the `tsconfig.json` include list, so no typecheck
-reports the gap.
+**`pocket build` dispatches only PSP, Vita and PocketBook builds.**
+`macos-app` builds through `tools/macos.ts`; `macos-widget` uses
+`tools/note.ts` or `tools/widget.ts`. `linux-app` and `web-app` plans can
+resolve, but neither has a `pocket build` backend. Use `pocket compile` to
+produce their JS and pak artifacts for host packaging.
 
 After dispatch, a backend reads resolved fields; it does not recalculate
 physical dimensions or output names from the target id. The serialized plan

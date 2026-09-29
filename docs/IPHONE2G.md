@@ -1,6 +1,6 @@
 # iPhone 2G / iPhone OS 3.1.3 development
 
-This document tracks the experimental PocketJS target for an original iPhone
+This document describes the experimental PocketJS target for an original iPhone
 (`iPhone1,1`). The current device target is iPhone OS **3.1.3** (`7E18`). The
 native artifact is still compiled with a byte-pinned iPhone OS **1.1.4**
 (`4A102`) sysroot and `LC_VERSION_MIN_IPHONEOS` of 1.1.4; that is its linker ABI
@@ -9,68 +9,35 @@ floor, not a claim that the connected phone still runs 1.1.4. The bundle's
 
 `PocketJSDemo.app` is an ARMv6 UIKit host containing the generated PocketJS
 JavaScript and asset pack, pinned QuickJS, and the PocketJS raster core.
-Building the bundle proves the compiler, linker, and packaging seam. It does
-not by itself prove that the 1.1.4-ABI binary runs correctly on 3.1.3.
-Deployment, drawing, and touch are therefore recorded as separate
-live-hardware acceptance gates below.
+**The profile targets `iPhone1,1` on iPhone OS 3.1.3 (`7E18`).** Building does
+not test USB deployment, drawing or touch on the device. Check those paths
+with the build-matched runtime diagnostics described below.
 
-## Current status
+## Recovery image and limits
 
-| Layer                        | Target                                                        | Status                   |
-| ---------------------------- | ------------------------------------------------------------- | ------------------------ |
-| Device hardware              | `iPhone1,1`, ARMv6, normal USB `05ac:1290`                    | **Pass**                 |
-| Installed system             | iPhone OS 3.1.3 (`7E18`), FactoryActivated                    | **Pass**                 |
-| Recovery                     | Legacy-iOS-Kit CustomHJ erase restore                         | **Pass**                 |
-| Device access                | SpringBoard, Cydia, `sshd`, and USB SSH                       | **Pass**                 |
-| Build ABI                    | 1.1.4 (`4A102`) sysroot and linker ABI floor                  | **Pass, local only**     |
-| 3.1.3 package/deployment     | Signed bundle plus transactional install/readback             | **Pass**                 |
-| PocketJS runtime/input       | Current-build guest frames and successful physical touch hits | **Pass, live device**    |
-| Installed-bundle persistence | Previous build remained complete across Home + Power restart  | **Pass, forced restart** |
-| Clean unattended reboot      | `/sbin/reboot` stalled and required Home + Power              | **Not established**      |
-
-The target remains private and experimental even though the exact
-build/deploy/runtime/input path now has a live-device receipt. Passing that
-receipt does not broaden support beyond `iPhone1,1` on 3.1.3 (`7E18`). In
-particular, a successful install and the presence of SpringBoard, Cydia, or SSH
-alone are not PocketJS runtime acceptance.
-
-## Verified 3.1.3 recovery receipt
-
-On 2026-08-05, the working recovery route was an **erase restore** to the pinned
-Legacy-iOS-Kit CustomHJ image:
+The toolchain pins the Legacy-iOS-Kit CustomHJ erase-restore image:
 
 ```text
 iPhone1,1_3.1.3_7E18_CustomHJ.ipsw
 SHA-1 8140ed162c6712a6e8d1608d3a36257998253d82
 ```
 
-The restore completed with `Status: Restore Finished`. After normal boot, the
-following independent checks passed:
+An erase restore reformats the installed system. A normal boot must enumerate
+as Apple USB product `0x1290`; `ideviceinfo` must report `3.1.3`, `7E18` and
+`FactoryActivated`. Check SpringBoard and USB SSH before deploying PocketJS.
+Entering WTF/DFU mode or starting a restore does not establish a usable system.
 
-- USB re-enumerated in normal mode as Apple product `0x1290`;
-- `ideviceinfo` reported `ProductVersion: 3.1.3`, `BuildVersion: 7E18`, and
-  `ActivationState: FactoryActivated`;
-- SpringBoard and Cydia launched;
-- `sshd` was running and a command completed over USB SSH.
+**A filesystem-disk image excludes baseband NOR and seczone.** It is not a
+complete radio or unlock backup. The 8 GB device’s filesystem disk contains
+8,120,172,544 bytes. Keep backups and their checksums outside the repository.
 
-This receipt proves the erase restore, normal boot, activation state, and a
-working USB shell transport. It does not prove that `PocketJSDemo.app` has
-been installed or executed. Do not replace this receipt with “entered WTF”,
-“image hash matched”, or “restore process started”; those were earlier gates,
-not completion.
-
-The restore erased and reformatted the installed system. The pre-change raw
-filesystem backup remains preservation evidence, but it does not contain the
-baseband NOR or seczone and must not be described as a complete radio/unlock
-backup. Its repo-external receipt is
-`backups/pre-jailbreak-20260804-1340/raw/rdisk0.img` under the iPhone 2G cache;
-the expected whole-filesystem-disk size is 8,120,172,544 bytes.
+Unattended `/sbin/reboot` is not supported by the device workflow: it can stop
+services and remain on the shutdown spinner. A forced Home + Power restart
+has different behavior and must not be treated as proof of unattended reboot.
 
 ## Safety and scope
 
-The supported device/installed-OS tuple for continued development is exact.
-The end-to-end build, deployment, runtime, and touch-input path is verified for
-this tuple, with the reboot caveat recorded in acceptance layer 4:
+The private profile is limited to this device and installed-system tuple:
 
 - device: `iPhone1,1` (original iPhone / iPhone 2G);
 - installed OS: iPhone OS 3.1.3, build `7E18`;
@@ -312,34 +279,19 @@ or touch on the phone.
 
 ## Render paths
 
-The host has two. **The software rasterizer is the default** because it is
-measurably faster here; the GL backend is opt-in.
+**The software rasterizer is the default.** OpenGL ES 1.1 is an opt-in path.
 
-| Path | Mechanism | Measured on `iPhone1,1` / 3.1.3 |
-| --- | --- | --- |
-| Software raster (default) | The core rasterizes only the damaged spans; `drawRect:` composites only the damaged rectangle. | **59.99 fps**, 1.44 ms guest + 5.93 ms raster + 0.26 ms composite |
-| OpenGL ES 1.1 | The core walks its whole DrawList into the fixed-function pipeline every frame. | **48.6–50.7 fps**, 1.8–2.3 ms guest + 12.8–16.2 ms submit |
+| Path | Mechanism |
+| --- | --- |
+| Software | Rasterizes damaged spans and composites the damaged rectangle through `drawRect:` |
+| OpenGL ES 1.1 | Submits the complete DrawList through the fixed-function pipeline on each rendered frame |
 
-The software path holds a **locked 60** at ~7.6 ms of a 16.67 ms budget. The GL
-path is correct and pixel-verified but costs 17–20 ms, because it re-submits and
-re-fills everything every frame; giving it the same damage treatment — scissor
-to the plan's bounds — is the open work.
-
-### What made the difference
-
-Scoping the composite, not the rasterizer. The rasterizer was always
-damage-limited; the composite was not. `setNeedsDisplay` invalidated the whole
-view and `pocket_draw_rect` discarded the rect UIKit passed, so every frame
-rebuilt a `CGImage` and blitted all 320×480. That cost **22–27 ms**. Now:
-
-- an **empty** damage plan invalidates nothing, so the frame costs no composite
-  at all — 626 of 961 frames in one sample;
-- a non-empty plan goes to `setNeedsDisplayInRect:`, and `drawRect:` clips to
-  whatever UIKit passes back.
-
-The composite fell from 22–27 ms to **0.26 ms**. No preservation guarantee is
-relied on: when UIKit discards the backing store it passes the full bounds and
-the code draws the full frame.
+An empty software damage plan skips view invalidation. A non-empty plan calls
+`setNeedsDisplayInRect:`, and `drawRect:` clips to the rectangle supplied by
+UIKit. If UIKit discards the backing store, it requests the full bounds and
+the host draws the complete framebuffer. The GL path does not apply the same
+damage scissor, so its submission cost is not comparable to a partial software
+composite without recording the changed area.
 
 ### Selecting a path
 
@@ -368,26 +320,12 @@ bun iphone2g launch
 `ps ax` prints nothing on this installation. Use `kill -0 <pid>` for liveness;
 `ps ax | grep` reports a running process as absent.
 
-### Sampling, and how much to trust one window
+### Sampling performance
 
-Take several windows. One is not enough, and the two paths differ in how stable
-they are.
-
-The software path is tight and reproducible. Five long-window samples over one
-run: **59.98, 59.97, 59.97, 47.97, 59.68 fps**, with `js+core` 1.42–1.44 ms,
-raster 5.96–5.98 ms and composite 0.25–0.26 ms. The single dip came with raster
-at 7.96 ms and is transient.
-
-The OpenGL ES 1.1 path fluctuates by roughly a factor of two in submit cost, and
-this is unexplained. The same five-sample run gave **46.95, 53.19, 47.60, 50.76,
-59.98 fps** with submit 15.40, 12.72, 15.79, 14.62 and **7.68 ms**. It is not
-warm-up — the cost goes up as well as down. The 7.68 ms sample arrived after the
-device had been untouched for about a minute, so display dimming changing what
-the window server composites is a candidate, but nothing here establishes it.
-
-**Do not quote a single GL window as the frame rate.** The steady-state range is
-47–53 fps; the outlier is recorded because leaving it out would be dishonest and
-folding it in would be worse.
+Measure several windows for each render path with the same guest, input and
+power state. Record guest/core, raster or GL submission, and composite time
+alongside delivered frame rate. A single window does not establish sustained
+performance. Keep startup, animation and settled-content measurements separate.
 
 ### Reading the record
 
@@ -428,24 +366,13 @@ produces a convincing false failure:**
 | GL (`glReadPixels`, `GL_RGBA`) | R,G,B,A | bottom-up |
 | Software (the core's ARGB32 words) | B,G,R,A | top-down |
 
-The wasm reference core emits R,G,B,A top-down. Comparing the software capture
-without swapping red and blue reports a mean difference of 9.3/255 and a picture
-in which every blue is orange.
+The WASM reference core emits R,G,B,A top-down. Swap red and blue for a
+software capture and reverse rows for a GL capture before comparison.
 
-Against the same guest rendered by the reference core, 200 frames in with
-animations settled:
-
-```text
-GL path                     mean 0.04 / 255, worst channel 7
-software, after 2581 frames mean 0.039 / 255, worst channel 186
-```
-
-Both residues are the animating spinner at a different phase — for the software
-capture the differing pixels sit inside x 37..56, y 253..281, within the
-spinner's own 40×40 box, with `damage_failures=0`. That is the test that matters
-for a damage-limited rasterizer: the framebuffer persists across frames and only
-damaged spans are rewritten, so under-reported damage accumulates as staleness
-a from-scratch reference render will catch.
+**Compare the same guest frame and animation state.** A phase mismatch can
+change pixels inside an animation without indicating stale damage. Compare
+persistent device frames against a from-scratch reference render to detect
+under-reported damage, and record `damage_failures` with the result.
 
 ### ES 1.1 state the ES 2 pipeline does not need
 
@@ -454,7 +381,7 @@ equivalent, because sampling there is written into the fragment shader:
 
 - **`glEnable(GL_TEXTURE_2D)`** — texturing is a per-unit enable in ES 1.1.
   Without it every fragment takes only its vertex colour, so flat fills look
-  correct while all text, images and atlas content vanish. This shipped once.
+  correct while text, images and atlas content vanish.
 - `glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)` — the documented
   default, stated because the drawable is shared with UIKit's compositor.
 - `glShadeModel(GL_SMOOTH)` — gradients interpolate per-vertex colour.
@@ -462,86 +389,49 @@ equivalent, because sampling there is written into the fragment shader:
 
 A test in `tests/iphone2g-profile.test.ts` pins all four.
 
-## Historical 1.1.4 incident and preservation record
+## Unsupported 1.1.4 recovery paths
 
-> **Archive, not a current runbook.** The sections below preserve the exact
-> 1.1.4-era design and the evidence that invalidated it. Do not execute their
-> ramdisk, bootstrap-install, filesystem-write, deployment, or rollback commands
-> on the restored 3.1.3 phone. They remain here so the failed mixed-version path
-> is reviewable and is not accidentally rediscovered.
+> **Do not use the archived 1.1.4 procedures on a 3.1.3 installation.** The
+> commands below describe an incompatible bootstrap and preservation design.
+> Mixing its ramdisk, filesystem writes or rollback files with the supported
+> 3.1.3 system can prevent booting.
 
-### Incident trigger: the temporary SSH ramdisk
+### SSH ramdisk and NAND format
 
-#### NAND epoch hazard observed on this device
-
-After the `ramdisk_7E18` SSH ramdisk was booted on this phone while it ran
-1.1.4, the installed 1.1.4 system stopped booting. This is a hardware
-observation from this incident, not a general claim that every possible 1.x
-recovery route is impossible.
-
-The Legacy-iOS-Kit SSH ramdisk for `iPhone1,1` is built from iPhone OS **3.1.3**
-(`7E18`). During this incident, opening the flash translation layer with its
-WMR/FTL driver changed the NAND format signature — the "epoch" — from the
-`C003` expected by 1.1.4 to `C005`, before the installed volumes were mounted.
-The native 1.1.4 bootloader then reported:
+The pinned Legacy-iOS-Kit SSH ramdisk for `iPhone1,1` uses iPhone OS **3.1.3**
+(`7E18`). **Opening NAND through its WMR/FTL driver can change metadata below
+the partition table before any installed volume is mounted.** On the documented
+1.1.4 configuration, that operation changed the NAND format signature from
+`C003` to `C005`; the 1.1.4 bootloader rejected the result with:
 
 ```text
 no signature or no production format
 root filesystem mount failed
 ```
 
-and the phone returned to Recovery on every native 1.1.4 boot attempt.
+A byte-matched filesystem restore and clean HFS checks do not restore that
+FTL metadata. The ramdisk can therefore make 1.1.4 unbootable without flashing
+its OS files or baseband. The repository provides no supported in-place epoch
+reversal. Do not reuse custom kernel/helper payloads for that purpose.
 
-Three consequences are easy to get wrong, so state them plainly:
+| Installed target | Recovery boundary |
+| --- | --- |
+| 3.1.3 (`7E18`) | The pinned CustomHJ erase-restore image reformats NAND; verify normal boot and USB SSH afterward |
+| 2.0–3.1.2 | Outside this repository’s supported device profile; the Kit’s custom-IPSW option does not establish compatibility |
+| 1.x, including 1.1.4 | No supported recovery route here; the pinned `restore.sh` excludes its 1.x path |
 
-- **Restoring the file data did not recover this incident.** On this
-  device the full 8,120,172,544-byte disk image was written back and re-read;
-  the MBR, every allocated `disk0s1` block and every allocated `disk0s2` block
-  matched the backup by SHA-256, and the era-matched `fsck_hfs -q` reported both
-  volumes `FILESYSTEM CLEAN`. 1.1.4 iBoot still refused to boot, because the
-  rejection happens _below_ the partition table.
-- **The step is not read-only, despite touching neither OS nor baseband.** The
-  paragraph below is accurate that the ramdisk does not flash the installed OS
-  or the baseband. It changes NAND metadata anyway, and that is enough to make
-  the installed OS unbootable.
-- **No in-place reversal was validated.** An attempted 1.1.4-era kernel/helper
-  path intended to drive the NAND FTL epoch selector wedged the device. Do not
-  reuse those unvalidated payloads.
+The 1.1.4 files supply the build sysroot. They are not the supported installed
+OS image.
 
-The recovery route that was actually validated was a **full 3.1.3 erase
-restore**, which reformatted the NAND as part of the restore. The table is
-scoped to the pinned Kit revision and this lab; it is not a universal statement
-about all hand-built restore research:
+### White-screen boot failure
 
-| Target               | Status in this lab                                                                                  |
-| -------------------- | --------------------------------------------------------------------------------------------------- |
-| 3.1.3 (`7E18`)       | **Verified** — the CustomHJ erase restore completed and normal boot/USB/SSH passed.                 |
-| 2.0 – 3.1.2          | Not tested here; the pinned Kit exposes an `Other (Custom IPSW)` path.                              |
-| 1.x, including 1.1.4 | **No validated route in this repository.** The pinned `restore.sh` says its 1.x path will not work. |
+A plain white screen with no USB enumeration does not identify one cause.
+Check Recovery, WTF (`0x1222`) and DFU (`0x1227`) by USB product ID. Stop repeated
+button cycles when neither display nor USB state changes.
 
-The project therefore retargeted this development phone to 3.1.3. The original
-1.1.4 bytes remain useful as a build sysroot and preservation record; they are
-not the current installed-system target.
-
-#### White-screen custom-kernel failure observed during the incident
-
-The failed custom boot showed a **plain white screen** with no USB enumeration.
-That establishes the symptom for this attempt; it does not establish that every
-white screen has the same cause.
-
-Repeated Home + top-button attempts did not recover this particular hang. Stop
-blind button cycles when neither the display nor USB state changes; first
-classify the USB mode with a detector that recognizes Recovery, WTF (`0x1222`),
-and DFU (`0x1227`) by product ID rather than product name.
-
-The exit used for this incident was complete power depletion. All power was
-disconnected; the backlight eventually went dark, the phone was left unpowered
-for a further interval, and only then was it reconnected for USB mode
-classification.
-
-After the SoC lost power, the phone again reached a bootrom/iBoot USB mode and
-the audited restore could continue. Power depletion is hard on an 18-year-old
-cell and is an incident outcome, not the first-line recovery instruction.
+Complete power loss allowed recovery from one custom-kernel hang, but that
+observation does not establish a safe recovery procedure for another device.
+Power depletion stresses an aged cell and is not the default recovery step.
 
 #### Archived prerequisites
 
@@ -1285,122 +1175,32 @@ normally and confirm that USB port 22 no longer accepts the bootstrap identity
 while activation, AFC services, baseband state, and stock filesystem policy
 remain unchanged.
 
-## Acceptance layers
+## Device validation
 
-Keep evidence for each layer separate. Passing an earlier layer is not evidence
-for a later one.
+Check build, deployment and runtime behavior as separate operations:
 
-### 1. Recovery and transport acceptance — passed
+1. Run `bun iphone2g doctor` and `bun iphone2g build`. Confirm an ARMv6 Mach-O
+   executable, the pinned linker ABI and the guest/native hashes in the build
+   receipt.
+2. Run `bun iphone2g install-bootstrap`. Verify the version-4 helper and
+   dedicated key by readback. Password-only SSH must be rejected. The existing
+   CustomHJ `sshd`, RSA host key and launchd plist must retain their hashes.
+3. Run `bun iphone2g deploy`. All five allowlisted bundle files must match the
+   local build after readback, and `transaction-state` must return `state=none`.
+   Root and data volumes must retain the expected read/write mount policy.
+4. Launch through SpringBoard, complete a Hero button press and release, then
+   run `bun iphone2g device-status`.
 
-- CustomHJ IPSW SHA-1 equals
-  `8140ed162c6712a6e8d1608d3a36257998253d82`.
-- The erase restore reports `Status: Restore Finished`.
-- The phone performs a normal, non-ramdisk boot and enumerates as USB `0x1290`.
-- `ideviceinfo` reports `3.1.3`, `7E18`, and `FactoryActivated`.
-- SpringBoard and Cydia launch.
-- The installed `sshd` accepts a command over the USB transport.
+**Runtime validation requires a fresh schema-2 record for the installed build.**
+The record must identify a live PID, timestamp, advancing heartbeat and guest
+frames, completed touch release and a `hero_tap` action with no runtime error.
+Schema 1 lacks those checks and is rejected. A bounds hit or screenshot alone
+does not establish that the application handled the input.
 
-These checks prove a usable restored system and shell transport. They do not
-prove the PocketJS helper, app transaction, or runtime.
-
-### 2. Linker ABI acceptance — passed locally
-
-- `bun iphone2g doctor` reports all required inputs `[ok]`.
-- `bun iphone2g build` exits zero.
-- `file` reports `Mach-O executable arm_v6`.
-- `otool-classic -L` and the build receipt match the pinned 1.1.4 linker ABI
-  contract.
-- The receipt identifies both embedded guest inputs and the combined native
-  runtime executable.
-
-This proves that the 1.1.4-ABI artifact links. It is not yet evidence that the
-retargeted, signed bundle executes correctly in the restored 3.1.3 userspace.
-
-### 3. 3.1.3 package and deployment acceptance — passed
-
-On the attached restored phone, the current commands produced the following
-live receipt:
-
-- `bun iphone2g install-bootstrap` accepted the exact `iPhone1,1`, 3.1.3,
-  `7E18` identity with read/write root and data mounts.
-- The signed version-4 helper and dedicated key passed their device readback
-  checks. A separate password-only SSH attempt was rejected.
-- Hashes of the existing CustomHJ `sshd`, RSA host key, and launchd plist were
-  identical before and after bootstrap installation.
-- A second `install-bootstrap` run reported that the key-only bootstrap already
-  matched and made no device changes.
-- `bun iphone2g deploy` installed only the five allowlisted
-  `PocketJSDemo.app` files, read every file back byte-for-byte, and committed
-  the identifier-matched transaction. An independent readback matched all five
-  local files and `transaction-state` returned `state=none`.
-- The helper and independent mount checks still reported read/write root and
-  data volumes after installation and commit. The application cache was
-  refreshed as `mobile`, SpringBoard restarted, and the PocketJS app, Cydia,
-  and `sshd` remained present.
-- After the cold restart described below, `install-bootstrap` again reported
-  an exact match without changing the device. Key-only SSH worked, a separate
-  password-only attempt was rejected, and the original CustomHJ `sshd`, RSA
-  host key, and launchd plist hashes still matched their pre-bootstrap values.
-
-This proves signing, bootstrap policy, byte-exact installation, transactional
-commit completion, and mount-policy preservation. SpringBoard icon rendering,
-Hero drawing, and physical touch are layer 4 evidence.
-
-### 4. Historical PocketJS Hero runtime receipt
-
-- The iPhone app now mounts the shared PocketJS Hero at 320 by 480, adapts its
-  action copy for touch, and reports the 60 Hz presentation rate.
-- Its dedicated 59-by-60 RGBA SpringBoard icon keeps the black-backed metal
-  mark but pre-bakes a bright chrome bevel, curved glass highlight, inner
-  shading, and transparent rounded corners in the original iPhone idiom. It
-  does not reuse the Hero demo player logo.
-- After the final deploy and SpringBoard launch, the current-build runtime
-  record was validated with:
-
-  ```sh
-  bun iphone2g device-status
-  ```
-
-  ```text
-  schema=1
-  build_id=ba1c0b15af4fdb72c6a98334332a8954
-  state=running
-  guest_frames=118
-  touch_sequences=11
-  touch_down=0
-  last_touch_x=71
-  last_touch_y=409
-  last_touch_hit=46
-  error=
-  ```
-
-  This schema-1 record predates the hardened acceptance protocol. It confirms
-  that the previous guest produced frames and received a touch bounds hit, but
-  **the current `device-status` command does not accept it** because it has no
-  PID, timestamp, heartbeat, completed-release counter, or application action.
-  A current receipt must report schema 2 and a `hero_tap` action after release.
-
-- A device-side `/sbin/reboot` stopped services but remained on its shutdown
-  spinner. Holding Home + Power completed the restart; this is a successful
-  forced-restart recovery receipt, not evidence that unattended `/sbin/reboot`
-  works on this installation.
-- After that restart, the phone re-enumerated in normal USB mode and again
-  reported `iPhone1,1`, 3.1.3, `7E18`, and `FactoryActivated`. Key-only SSH,
-  helper version 4, and read/write root/data mounts all survived.
-- The final deployment transaction found the complete pre-restart build
-  `b9c69d6f30e24e0f24f05817ad3ec6c4` in the app location and moved its receipt
-  into the transaction backup before installing the current build. This
-  proves bundle persistence across the forced restart; it does not turn the
-  stalled `/sbin/reboot` into a clean-reboot result.
-
-A dated photo or video remains useful supplemental evidence. It is not a
-replacement for a fresh, build-matched schema-2 status receipt.
-
-**The changed Solid count after a completed release is the application-level
-runtime proof.** The native host must load and execute the embedded guest,
-render its PocketJS tree, deliver physical touch through the PocketJS input
-path, and receive `hero_tap` from the reactive count effect. Build, upload, or
-a bounds hit alone does not meet that criterion.
+The Hero host uses a 320×480 logical viewport and a dedicated 59×60 RGBA
+SpringBoard icon. Check icon discovery, rendered content and application state
+after deployment. Restart behavior must be checked as a separate operation;
+the `/sbin/reboot` limitation above still applies.
 
 ## Primary references
 

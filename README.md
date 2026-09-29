@@ -252,12 +252,10 @@ See also: [Architecture](https://pocketjs.dev/docs/architecture/) ·
 
 ## Hardware support
 
-PocketJS has booted on every operating system below, on the real machine. What
-changes between them is one native submission layer, never the application, and
-each row links to the post or pull request that brought it up. Keeping the
-hardware bootable is its own work, tracked in Pocket Museum.
+PocketJS uses a native submission layer for each operating system below.
+The links describe the host integration and its hardware constraints.
 
-| Operating system | Native submission layer | Receipt |
+| Operating system | Native submission layer | Guide |
 | --- | --- | --- |
 | PSP system software | MIPS, 32 MB | [Introducing PocketJS](https://pocketjs.dev/blog/introducing-pocketjs/) |
 | PS Vita system software | ARM, GXM | [Twice the pixels, zero forks](https://pocketjs.dev/blog/pocketjs-on-ps-vita/) |
@@ -341,7 +339,7 @@ be packaged as inspectable, target-thinnable
 
 The [TypeScript support reference](./site/content/docs/typescript-support.md)
 compares ordinary application code, AOT views and compiled model bodies,
-including their restrictions and current implementation limits.
+including their supported constructs and restrictions.
 
 [MicroTS](https://pocketjs.dev/docs/microts-boundaries/) compiles
 Solid TSX and Vue SFC views to Rust through a shared typed View IR.
@@ -375,7 +373,7 @@ repository or the Rust AOT build.
 | [`contracts/`](./contracts/) | Generated wire specs, capability registry, manifests, build plans, and package formats |
 | [`hosts/`](./hosts/) | PSP, Vita, web, desktop, e-reader, phone, and MCU host integrations |
 | [`hosts/esp-idf/`](./hosts/esp-idf/) | Composable package, QuickJS, UI, RGB565, PPA, and runner components for P4/S3 firmware |
-| [`apps/`](./apps/) | Framework demos and system applications used by the launcher and acceptance suites |
+| [`apps/`](./apps/) | Framework demos and system applications used by the launcher and test suites |
 | [`tools/`](./tools/) | Build, package, launcher, device, DevTools, benchmark, and release commands |
 | [`tests/`](./tests/) | Contract, compiler, simulation, emulator, package, and golden verification |
 | [`docs/`](./docs/) | Platform, runtime, determinism, DevTools, backend, and benchmark records |

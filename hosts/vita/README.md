@@ -1,6 +1,6 @@
 # PocketJS for PS Vita
 
-For physical rendering acceptance, build with `bun tools/vita.ts hero --features=bench`.
+To capture GPU output and CPU frame timings, build with `bun tools/vita.ts hero --features=bench`.
 The live-input build saves three **GXM render-buffer readbacks** and 720 CPU frame
 samples under `ux0:/data/pocketjs-bench/<bundle-hash>/`. Keep it running for at
 least 15 seconds, exercise the controls, then return to VitaShell to retrieve
@@ -9,7 +9,6 @@ The captures wait for GPU completion; exclude capture frames 120, 360, 600 and
 their following frame intervals from timing statistics. `cpu_frame_us` ends at
 swap submission; it does not measure GPU execution or input-to-panel latency.
 This feature keeps physical input and does not use the CPU golden rasterizer.
-An emulator run still requires separate evidence from physical hardware.
 Normal builds do not enable benchmark captures. They include the
 [USB developer runtime](../../docs/VITA-USB.md): L+R+SELECT opens its native
 menu, and `bun run vita:dev` sends guest/native updates and captures over USB.
@@ -37,7 +36,7 @@ contact ids in 480x272 logical coordinates through `touches()` from
 
 The supported local setup is:
 
-- VitaSDK in `$VITASDK` (this workstation uses `~/vitasdk`)
+- VitaSDK in `$VITASDK` (for example, `~/vitasdk`)
 - `cargo-vita` 0.2.2
 - Rust nightly `2026-05-28` with `rust-src`
 - Vita3K for emulator E2E

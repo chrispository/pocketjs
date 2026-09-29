@@ -68,8 +68,9 @@ bun site/verify-hero.ts http://127.0.0.1:4173/
 
 The browser verifier checks contact selection, lower-screen scrolling, Vita
 button raycasts and release, and records screenshots and JSON receipts under
-the ignored `dist/handheld-models/` directory. Browser and Blender receipts cover the homepage models and demos;
-they do not constitute physical-console deployment or acceptance.
+the ignored `dist/handheld-models/` directory. These commands exercise the
+homepage models and browser demos. Console applications use their host's
+deployment workflow.
 
 [View the hinge animation](../../engine/pocket3d/examples/handheld/assets/new-nintendo-3ds/preview-hinge.gif).
 Render it from the committed `.blend` file:

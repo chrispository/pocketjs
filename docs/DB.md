@@ -1,11 +1,8 @@
 # The DB Module
 
-DB is PocketJS's fourth module (after `ui`, `strike` and `audio`): SQLite
-mounted as `globalThis.db` behind five synchronous ops. Like audio it was
-written spec-first — the boundary existed before any host code, every host
-implements the same pinned protocol, and a developer adding a data feature
-extends the spec instead of forking a host. `contracts/spec/db.ts` is
-normative; this page is the map.
+**SQLite is mounted as `globalThis.db` behind five synchronous operations.**
+`contracts/spec/db.ts` defines names, value encoding, limits and operation
+semantics. `@pocketjs/framework/db` supplies the application API.
 
 ```
 platform storage (POSIX file · LittleFS · memory)              Host / substrate
@@ -134,9 +131,7 @@ the spec, the SDK, or any app:
   `cache_size=-32`).
 
 What the crate cannot carry is the build environment; a firmware adds, in
-its `.cargo/config.toml` (values validated on an ESP32-P4, ESP-IDF v5.5.x,
-LittleFS workspace — where a 288-row transaction landed in ~0.4 s on
-~70–80 KB of heap and survived power cycling):
+its `.cargo/config.toml` for an ESP32-P4, ESP-IDF v5.5.x and LittleFS:
 
 ```toml
 [env]
@@ -157,6 +152,5 @@ no SQLite source patches, no custom VFS to write.
 A firmware that brings its own QuickJS embedding depends with
 `default-features = false`: that drops the `mount` helper and its
 pocket-mod/rquickjs dependency, so the MCU build compiles only the module
-core plus SQLite. Verified: `cargo check` for `riscv32imafc-esp-espidf`
-compiles the crate and the bundled `libsqlite3.a` clean under this
-recipe.
+core plus SQLite. Use `cargo check --target riscv32imafc-esp-espidf`
+with that firmware configuration to check the crate and bundled SQLite build.

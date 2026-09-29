@@ -14,12 +14,11 @@ simulation time, `input.buttons`, `input.touch`, and `text.glyphs.baked`.**
 | Install requirement | **a rooted Classic**: a stock device accepts an unsigned development BAR with a BlackBerry debug token, and the service that issued tokens is retired |
 | Input source | libscreen keyboard, multi-touch, and `SCREEN_EVENT_JOYSTICK` trackpad events; navigator system keys |
 | Toolchain | digest-pinned BBNDK Docker image (compile, package, deploy) |
-| Hardware status | **first device run recorded** (below) |
 | Command | `bun blackberry-qnx …` |
 
-The target stays outside `POCKET_TARGETS` until installation, boot,
-presentation, touch, keyboard, trackpad, background/resume, and repeatable
-delivery are all recorded.
+**This device profile is private and remains outside `POCKET_TARGETS`.**
+Physical keyboard symbols, navigation-key policy and repeated upgrade delivery
+require device-specific validation.
 
 ## Device contract
 
@@ -144,7 +143,7 @@ The receipt records the resolved host contract, image digest, QuickJS and
 Rust pins, build id, `readelf` output, and SHA-256 of every native input and
 output.
 
-### Install and device acceptance
+### Install and check device behavior
 
 Installing or launching changes device state and is not part of `build`.
 Enable Development Mode on the Classic (Settings › Security and Privacy ›
@@ -169,30 +168,17 @@ The host rewrites `data/pocketjs-qnx.status` whenever its content changes:
 build id, lifecycle stage, frame count, raw keyboard and trackpad facts, event
 totals, and the latest reported Hero action.
 
-The first hardware run must show: the Hero fills the 720×720 display through
+After deployment, check that the Hero fills the 720×720 display through
 GLES2; the spinner and underline animate at the fixed 60 Hz step; a tap
 activates the button; trackpad movement focuses it and a click activates it;
 Enter and Send activate it; background and resume stop and restart
 presentation without losing state; repeated installs keep a usable sandbox.
 
-### First Classic hardware result
+### Input and lifecycle checks
 
-**BlackBerry Classic SQC100-4, BlackBerry 10.3.3.3216.** The unsigned
-development BAR installed and launched through the rooted device transport.
-The live status record confirmed:
-
-- **720×720 GLES2 presentation with the 360×360 density-2 guest**;
-- **2,747 rendered frames** across foreground, background, and resume;
-- **12 touchscreen events**;
-- **56 trackpad joystick events and 4 trackpad clicks**;
-- **8 completed `hero_press` actions**.
-
-This accepts native loading, the QuickJS and Rust runtime, rendering, touch,
-trackpad navigation and click, and lifecycle resume. Physical keyboard
-symbols, navigation-key policy, repeated upgrade delivery, and a captured
-screen remain open, so the target stays private. **The input path changed
-after that run** — the host now feeds the shared `pocket_input` state machine,
-which reports a touch release at the next frame instead of one frame later
-and ignores a second finger — **and the host was re-accepted on the same
-device with that path** (`device-status`: tap, trackpad focus and click, and
-release timing as specified).
+Use `device-status` to check presentation, touchscreen delivery, trackpad
+navigation and clicks, application actions, and foreground/background frame
+counts. **The host uses the shared `pocket_input` state machine.** Touch release
+appears on the next frame, and a second finger does not replace the tracked
+contact. A device check must exercise both rules alongside keyboard input and
+repeated installation.

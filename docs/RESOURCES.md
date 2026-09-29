@@ -36,8 +36,8 @@ Text pages, table rows and image tiles use the same availability contract;
 the application chooses their placeholder geometry. Animated skeletons should
 use a shared animation clock or native animation, rather than one timer per row.
 
-The state model is renderer-neutral. The UI boundary in this change supports
-Solid; Vue Vapor and Octane boundary components are not implemented.
+The state model has no renderer dependency. **The UI boundary supports Solid.**
+Vue Vapor and Octane require their own boundary adapters.
 
 ## Shared read scheduling
 
@@ -226,19 +226,17 @@ content. Pocket Doc uses an independent layout-window collection for this reason
 
 A continuous media stream is **not a sequence of cache refetches**. Video and
 audio require a separate bounded stream contract with decoder ownership, clocks,
-backpressure, seek generations and frame deadlines. This change supports the
-browser surrounding a player; it does not add a 3DS video decoder. Collaborative
+backpressure, seek generations and frame deadlines. The resource scheduler
+supports the browser surrounding a player; it does not provide a video decoder. Collaborative
 operation logs likewise need ordered delivery and resynchronization rather than
 last-value caching. Multi-resource atomic reveal, persistent device caches and
 provider invalidation subscriptions are not implemented by this scheduler.
 
-The companion is the execution location and transport; the resource cache owns
-reusable read values and their UI working set. The `createQuery` implementation
-on the separate companion branch provides reactive per-query request/reply and
-previous-value retention, while this scheduler adds shared admission, reuse,
-priority, byte reservations and native-value disposal. No companion wire format
-or daemon implementation is imported. A future adapter must preserve bounded
-admission and frame delivery rather than adding another independent queue.
+The companion owns provider execution and transport. The resource cache owns
+reusable read values, shared admission, priority, byte reservations and native
+value disposal. **Transport adapters must preserve the scheduler’s admission
+and frame-delivery bounds.** An adapter must not introduce an independent
+unbounded request queue.
 
 **These are work-count and memory contracts, not a proof of a 16.7 ms frame.**
 JavaScript callbacks can still perform excessive computation. Loaders,
@@ -247,16 +245,14 @@ and bulk IO remain off the UI thread. The configured collections and entry
 counts also bound scheduler scans. A stronger device can increase those budgets
 or run the provider locally in a worker while keeping the same guest model.
 
-## Pocket Doc migration
+## Pocket Doc configuration
 
 Pocket Doc uses four collections: eight file pages, eight layout windows,
 72 Markdown tiles and 20 text tiles. They share four active requests, two starts
 and one materialization per frame. File/geometry demands precede visible text
 and document textures, followed by directional prefetch. The application retains
-its viewport planner and 12 physical rendering slots. Scoped views replace
-manual row notification lanes, version signals and cache-shaped store wrappers.
-Unicode text components declare their own demand instead of relying on a central
-scan of file labels and editor text. Framework subscriptions notify consumers by
+its viewport planner and 12 physical rendering slots. Scoped views subscribe
+to the keys they render. Unicode text components declare their own demand. Framework subscriptions notify consumers by
 key. Deduplication, generation checks, retries, admission, eviction and texture
 release share the same scheduler implementation. Documents, SQLite drafts, Markdown layout and rasterization remain in
 the Mac provider. No renderer ABI or companion protocol changes are required.

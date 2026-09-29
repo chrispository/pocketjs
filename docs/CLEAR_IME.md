@@ -11,7 +11,7 @@ Clear supports **application text composition** on the iPod touch 4 and Moto G P
 | Pocket Term | Terminal view, input, bounded coverage uploads | A supervisor and authenticated daemon own PTYs; transport workers can reconnect |
 | Clear IME | Keyboard, composition transcript, editor revision, committed text, textures | Rime process, dictionaries, conversion, CJK rasterization |
 
-The inspected source revisions are [Pocket Doc `host/serve.ts`](https://github.com/pocket-stack/pocket-doc/blob/b3a0d72a377226ef01ed95c3162eb83c91024805/host/serve.ts), [Pocket Map `host/serve.ts`](https://github.com/pocket-stack/pocket-map/blob/457a33568a96bc44c24c4f7a7cc55cd2d2cba592/host/serve.ts), and [Pocket Term `host/serve.ts`](https://github.com/pocket-stack/pocket-term/blob/34f27c816ac1903ed3d53b08f8f81f5ec2ec43b4/host/serve.ts), alongside PocketJS `tools/companion-session.ts`, `tools/offload-provider.ts`, and `framework/src/offload.ts`.
+Provider examples are [Pocket Doc `host/serve.ts`](https://github.com/pocket-stack/pocket-doc/blob/b3a0d72a377226ef01ed95c3162eb83c91024805/host/serve.ts), [Pocket Map `host/serve.ts`](https://github.com/pocket-stack/pocket-map/blob/457a33568a96bc44c24c4f7a7cc55cd2d2cba592/host/serve.ts), and [Pocket Term `host/serve.ts`](https://github.com/pocket-stack/pocket-term/blob/34f27c816ac1903ed3d53b08f8f81f5ec2ec43b4/host/serve.ts), alongside PocketJS `tools/companion-session.ts`, `tools/offload-provider.ts`, and `framework/src/offload.ts`.
 
 **The render thread never opens the companion socket or reads a dictionary.** `hosts/shared/offload_posix.c` owns a pthread, loopback listener, key-file reads, socket authentication and transfers. The guest submits and drains fixed-capacity queues. Each record has a connection generation; a later connection cannot consume a previous connection's response. The 3DS and POSIX hosts share the queue and coverage decoder.
 
@@ -43,7 +43,7 @@ onCleanup(() => ime.dispose());
 
 `renderComposition` receives pending/connected/error state alongside the snapshot. `insertAtCaret` receives committed text. The application supplies both callbacks and owns its text model. `accept()` selects candidates when available, with a 400 ms virtual-time deadline for confirmation. Disconnection, provider error or deadline expiry commits raw input through the same callback. `commitRaw()` ends the transaction and cancels its requests before delivering text. A mode change uses this operation; cancellation uses `reset()`. Local commits cannot replay after reconnection.
 
-## Setup on this Mac
+## Mac setup
 
 Install Bun, the repository dependencies, Homebrew `librime`, and the platform tools described below. Then run:
 
@@ -147,9 +147,7 @@ Keyboard icons are authored filled SVG contours in `apps/clear/`. The globe uses
 
 `bun run test` includes shared queue/authentication/generation tests, IME revision/reconnect tests, text cache and pixel continuity tests, candidate scroll/selection tests and the Moto viewport plan test. `bun tools/ime/verify.ts` requires the built native Rime data and checks Chinese phrases, candidate selection, deterministic replay, paging, read windows, absolute selection, backspace, caret movement, raw commit and space selection.
 
-**Native validation covered composition, candidate scrolling and selection, caret bounds, offline deletion and reconnect on both devices.** Deployment included byte readback on iPod and APK hash readback on Moto. The implementation's test results, measured performance and selected screenshots are recorded in [PR #396](https://github.com/pocket-stack/pocketjs/pull/396).
-
-To repeat device acceptance after building, installing and starting the companion:
+To check device behavior after building, installing and starting the companion:
 
 1. Open a list row, type `ni`, expand the candidate panel, scroll, then tap a candidate. Drag release must leave composition active; the later tap commits the selected candidate and restores the keyboard.
 2. Type `haha`, hold Space and drag past each end of the preedit. The caret must stay at the input boundary. Releasing the hold must not insert a space or commit a candidate.
@@ -159,4 +157,4 @@ To repeat device acceptance after building, installing and starting the companio
 
 **Static panels and sustained scrolling require separate timing runs.** On iPod, start from a fresh launch, compose `ni`, expand the panel, wait four seconds, then drag 140 logical points over eight seconds in each direction. Sample device status before taking captures. Use distinct 60-frame heartbeat windows with `touch_down=1`; compute delivered FPS as `window_frames × 1,000,000 / window_us`. `frame_us` measures the guest/core frame before presentation, and `submit_us` measures GL submission. Keep first-pass and reverse-pass results separate. Window means do not establish frame-time percentiles or physical-finger response times.
 
-Capture commands write to ignored `dist/` output. Keep per-run screenshots, logs and device receipts under `.pocket-build/validation/clear/<run>/`; attach selected images and a validation summary to the PR. Versioned image fixtures belong with the tests that consume them. iPod capture reads the app's rendered frame; Android capture reads the device display. GraphicsServices and ADB input exercise native input routes; physical-finger testing remains a separate check.
+Capture commands write to ignored `dist/` output. Keep per-run screenshots, logs and device receipts under `.pocket-build/validation/clear/<run>/`. Versioned image fixtures belong with the tests that consume them. iPod capture reads the app's rendered frame; Android capture reads the device display. GraphicsServices and ADB input exercise native input routes; physical-finger testing remains a separate check.

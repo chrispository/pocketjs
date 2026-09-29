@@ -308,7 +308,7 @@ Even the icon became a miniature version of that last point. Meizu's shell cache
   </figure>
 </div>
 
-For the record, the original session accepted build, deployment, launch, native 480×720 output, touch, Home/Escape exit, and shell registration on one physical M8/M8SE. The final post-review tree was rebuilt and passed all eleven host/build validation stages, but that last binary was not redeployed after the phone stopped enumerating over USB. The screenshots here belong to the earlier device-proven builds and dialog capture. The phone is not connected now, and this rewrite did not manufacture a fresh hardware result.
+The hardware results in this article come from one physical M8/M8SE and cover deployment, launch, native 480×720 output, touch, Home/Escape exit, and shell registration. The screenshots belong to those device-tested builds and the dialog capture. A subsequent binary passed the host/build checks but was not retested on hardware because USB enumeration failed; those checks do not establish its device behavior.
 
 That evidence boundary matters because nostalgia is already generous enough. We do not need to make the machine more successful than it was to respect what its engineers achieved.
 

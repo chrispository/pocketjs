@@ -49,8 +49,8 @@ body or change character movement.
 
 `World::exposure` returns ordered intersections and their combined transmission.
 Reaction steps use a compact list of transport surfaces. Contact conduction uses
-sphere/capsule surface distance and `thermal_contact_tolerance`, rather than the
-previous 0.35 metre proximity range. A separating barrier interrupts that path.
+sphere/capsule surface distance and `thermal_contact_tolerance`. A separating
+barrier interrupts that path.
 Radiant packets pay their original share of the combustion budget before
 occlusion. Reactive barriers receive intercepted energy; inert barriers export it
 out of the simulated thermal system. A blocked receiver's share is not reassigned
@@ -80,7 +80,7 @@ surface rate is zero to preserve the existing boiling-only configuration.
 **Transported water obeys emitted = retained + runoff + escaped.**
 `StepReport::transport` records these quantities, evaporation, per-object water
 delivery and radiant heat interception. Runoff and escaped water leave this
-compact model; persistent puddles and lateral surface flow are future mechanisms.
+compact model; it does not simulate persistent puddles or lateral surface flow.
 Legacy targeted `Douse` inputs and ambient absorption are outside this transport
 ledger. `World::ignition_status` explains the current fuel, moisture and temperature
 conditions without changing reaction state.
@@ -92,14 +92,11 @@ Exposure tests cover two collider/material configurations, moving and rotated
 barriers, porous transmission, saturation, fixed rain budgets, energy-funded
 drying, contact distance and snapshot replay.
 
-## Solver changes
+## Solver limits
 
-**Shared solvers do not branch on entity IDs, tags, recipes, or scenarios.** A
-fix to collision, integration, attachments, structures, or reactions changes a
-general rule, states the invariant that rule preserves, and tests the invariant
-across at least two entity configurations, material combinations, or collider
-combinations. Scenario regressions are additional coverage, not the proof of a
-shared rule.
+**Shared solvers do not branch on entity IDs, tags, recipes, or scenarios.**
+Collision, integration, attachments, structures, and reactions use geometry,
+material parameters, and the supplied environment.
 
 The current narrow phase is a single discrete sphere/capsule pass, and reactive
 pair checks are quadratic in active entity count. High-speed continuous

@@ -1,66 +1,15 @@
-# From launcher to platform — the Pocket app-runtime roadmap
+# Application packages and runtime admission
 
-LAUNCHER.md specifies what ships today: one PSP EBOOT or Vita VPK, every
-target-admissible app embedded, whole-guest switching behind three append-only
-surface ops. This document is the forward design: what turns that launcher
-into a platform — a mini-app runtime with an install story, a system
-transition, and a DX that stays instant — without breaking the contracts that
-got us here.
+**A guest package carries its manifest and target-specific artifacts.** The
+build resolver admits each target variant against its host capabilities,
+viewport and ABI. Hosts reject variants they cannot execute. The
+[launcher](LAUNCHER.md) switches whole guests through the app-switching surface;
+package loading and delivery belong to the host.
 
-The one-line thesis: **Pocket is already most of a mini-app runtime, and
-its unfair advantage is determinism.** Same bundle + same inputs = same
-bytes on screen, on every host. That means third-party packages can be
-admission-checked, golden-verified and byte-audited by CI — platform
-review as a pure function, not a queue of humans.
+This document covers the `guest` execution class. The manifest also reserves
+`aot` in `execution.classes`; guest hosts require a guest artifact.
 
-## Layers (what exists, what's missing)
-
-| layer | contents | status |
-|---|---|---|
-| L0 contract | spec.ts ISA, append-only ops, capability registry, manifest admission | SHIPPED — the platform's constitution |
-| L1 hosts | psp / vita / sim / web against one HostOps contract; guest lifecycle (boot/teardown/switch) | switching shipped on psp + vita + sim + web |
-| L2 distribution | `.pocket` package, on-device install, host-relay push | format SHIPPED (v1, below); install + push next |
-| L3 experience | launcher-as-Home, switch veil, DevTools time travel | launcher shipped; veil below |
-
-Rule 5 of RUNTIMES.md stays the platform's first law: every capability a
-guest can observe is a surface op behind a capability id — never a host
-branch. The launcher followed it (ops 39..41) and stayed testable on every
-host; distribution must follow it too.
-
-This document covers the **guest execution class**: one portable bundle
-with runtime admission against the target registry. The manifest also reserves
-`aot` in `execution.classes`; guest hosts reject packages without a guest
-artifact.
-
-## The switch veil (system transition)
-
-A guest swap has a dead window: teardown is instant but the incoming
-bundle's `JS_Eval` blocks the worker for 0.3–0.5 s (dev-trace builds print
-boot stages there, which is the "QuickJS log stream" seen on hardware;
-production builds hold the last frame). The veil turns that window into a
-designed moment:
-
-- After the outgoing frame presents (and the summon shot is captured), the
-  HOST owns the GE. It plays a short direct-drawn animation — ~24 vblanks:
-  frozen shot (or stage black) dimmed underneath, the baked Pocket mark
-  fading in centered, a highlight sweeping across it — then starts the
-  eval. The display holds the settled last veil frame through the eval,
-  and the incoming guest's first present replaces it.
-- Everything is host-side and asset-baked (the mark rasterizes from
-  `assets/brand/` at build time into an embedded RGBA texture; the sweep
-  is vertex-alpha strips over the same texture, additive-blended — the
-  PSP-era way to mask a glow to a glyph without a second texture).
-- The guest never knows. No op, no capability, no sim/golden impact: veil
-  frames present outside the input-indexed frame loop, so the capture
-  identity (input at frame N ↔ file fN) and the e2e switch signature are
-  untouched.
-- Budget: one 128×128 RGBA texture (64 KB rodata) + ~100 lines of GE code.
-
-Two refinements stack on top later, both cheap: the launcher can play a
-200 ms card-zoom before calling `appLaunch` (pure JS, no host change), and
-qjsc bytecode (below) shrinks the hold the veil is papering over.
-
-## `.pocket` — the package format (SHIPPED, v1)
+## Package format
 
 Spec: `contracts/spec/pocket-package.ts` (TS encoder/decoder) + `engine/core/src/package.rs`
 (no_std zero-copy reader), pinned to one committed fixture so the two
@@ -77,13 +26,11 @@ variants TARGET VARIANTS — dist bundles are target-flavored (psp density 1,
          7 fixed-width ESP-IDF host inputs; unknown kinds skip).
          Per-variant FNV-1a64: `thin` extracts a device subset from a
          universal file without changing any variant's identity.
-footer   FNV-1a64 over the whole file (the stale-embed tripwire, now a
-         file format)
+footer   FNV-1a64 over the whole file
 ```
 
 Tools: `bun run pocket:pack build --manifest … --target psp --target vita`
-(each target compiles into its own outdir — the stale-dist lesson,
-institutionalized), plus `inspect`, `thin`, `verify` (footer + per-variant
+(each target compiles into its own output directory), plus `inspect`, `thin`, `verify` (footer + per-variant
 re-admission of the embedded manifest). The launcher chain
 (`tools/launcher.ts pack --target psp|vita`) emits target-thinned packages
 into separate trees. Both native binaries embed the `.pocket` files verbatim
@@ -94,86 +41,59 @@ Design rules:
 
 - The manifest travels INSIDE the package and is re-admitted on device
   (below) — a package is self-describing, never trusted by filename.
-- The hash footer makes torn copies and stale syncs self-announcing — the
-  same tripwire philosophy as the embedded-bundle hash (a stale embed once
-  burned two rounds of hardware verification; distribution inherits the
-  lesson for free).
+- The hash footer detects incomplete copies and content changes.
+  **FNV checksums provide integrity checks, not publisher authentication.**
 - Corrupt or inadmissible packages fail into the launcher's existing
   broken-guest path (log + return to deck), never a halt.
 - ESP-IDF variants duplicate their target ABI in the variant entry and binary
   host-input record. The device compares target, ABI, tick rate, viewport,
   density, presentation, and host-profile SHA-256 before exposing JS/PAK spans.
 
-## Dynamic install & runtime admission
+## Host admission and delivery
 
-- **Loading**: the eval path already treats bundles as data — the PSP host
-  reads `.pocket` files from `ms0:/POCKET/apps/` into the arena and evals
-  exactly like an embedded entry (svc/video proved runtime file IO). The
-  appTable becomes the union of embedded entries and scanned packages;
-  covers come from the package. Memory model is unchanged except the
-  current app's js+pak live in the heap instead of rodata — the budget
-  table gains one line.
-- **Admission on device**: build-time admission is
-  `validateAndResolveBuildPlan`, a pure function. The device re-runs the
-  decision — either a minimal Rust port of the capability-superset +
-  viewport check, or (simpler first step) the pack tool embeds the
-  resolved plan and the device verifies plan.target/abi/viewport against
-  its own profile. Either way: no capability, no boot — same rule as the
-  build.
-- **Channels, honestly ordered**: (1) copy to the memory stick — works
-  today, zero code; (2) `pocket push` over the existing USB svc relay —
-  the Mac downloads, verifies, writes to ms0; (3) wireless on-device
-  fetch — LAST, because the PSP has no TLS and an 802.11b radio; the
-  trusted downloader stays on the tethered host. Every step e2e-testable
-  before the next.
+A host must verify package integrity and its target-specific admission contract
+before exposing JavaScript or PAK bytes. Build-time admission uses
+`validateAndResolveBuildPlan`; the package carries the admitted manifest and
+resolved plan. A filename does not establish target identity or capability
+support.
 
-## Bytecode (the eval wall)
+**Package format support does not imply a device installer.** Delivery paths
+belong to the target host: embedded launcher packages, browser fetch, USB
+transfer, or device storage. Consult the host's deployment instructions. A host
+that loads packages into RAM must budget for the active JavaScript and PAK in
+addition to the guest heap, native tree and textures.
 
-QuickJS evals ~100 KB of source in ~0.3–0.5 s at 333 MHz; that is the
-whole switch latency. qjsc bytecode loads 5–10× faster and shrinks
-bundles. Plan: `pocket pack --bytecode` emits qjsc output alongside source
-(sim keeps evaling source — the wasm core has no qjsc), the PSP host
-prefers bytecode when the package carries it, and the bundle hash covers
-whichever form is embedded. Risk to manage: bytecode pins the exact
-QuickJS version — the package header gains an engine-abi field, and a
-mismatch falls back to source.
+Section kind 6 is reserved for QuickJS bytecode. The packer does not emit it.
+A bytecode loader would also need to verify the exact QuickJS engine ABI;
+source-based hosts must retain a compatible source artifact.
 
-## Memory governance
+## Guest switching
 
-The PSP-1000's 24 MB is the floor and texture heap is the cliff (the
-reflection feature OOM'd it once — the handler parks on vblank, which in
-PPSSPPHeadless looks like a silent timeout). Platform rule: `pocket pack`
-computes a per-app memory line (js + pak + expected texture heap) and the
-launcher displays it; admission warns when a package cannot fit the
-device's arena. Budgets become data, not folklore.
+The host completes and presents the outgoing frame before destroying its
+QuickJS realm and UI core. It then initializes the incoming package with a
+fresh realm, core and resources. **Switching does not preserve guest state.**
+The frozen outgoing image is a visual transition asset, not a saved heap.
 
-## The DX pipeline (what keeps it silky)
+The PSP host can draw its baked switch veil outside the input-indexed guest
+frame loop. It holds that image while the incoming JavaScript is evaluated;
+the incoming guest's first presentation replaces it. Host transition frames
+do not advance the guest tape. The veil uses one 128×128 RGBA texture and
+host-rendered alpha geometry.
 
-The launcher's PSP hardware round found four bugs invisible to the sim
-(nearest-sampling shimmer, the affine seam kink, the texture-heap OOM,
-4-bit-alpha banding) — PPSSPP's software GE caught three, real hardware the
-rest. Vita adds a native-density Vita3K leg with current-guest sidecars and
-repeated resource-reuse swaps before its real-device pass. That gradient is
-the platform's QA design:
+## Validation
 
-1. **sim** — second-scale iteration, deterministic traces, tree asserts;
-2. **console emulator** — PPSSPPHeadless exercises GE semantics (affine
-   sampling, texture-cache quirks, RAM ceiling); Vita3K exercises the real Vita
-   host lifecycle, 960×544 CPU-oracle renders, LiveArea VPK, and GXM resource
-   boundaries under baked input scripts;
-3. **hardware** — PSPLINK hot-reload (`reset` → `ldstart`) and `pspsh cp` on
-   PSP; install the validated `dist/vita/launcher-main.vpk` for the Vita pass.
+Use deterministic sim traces and tree assertions for guest behavior. Exercise
+GPU and lifecycle behavior through the target's emulator, then check the
+physical device:
 
-Single-command chains (`launcher.ts scan|covers|build`), append-only
-contracts, and goldens as gates keep third-party DX at "write TSX → see it
-in a second → one command to the handheld."
+- PPSSPPHeadless exercises PSP GE sampling, texture-cache behavior and RAM
+  limits. PSPLINK provides `reset`, `ldstart` and `pspsh cp` for device runs.
+- Vita3K exercises the Vita host lifecycle, 960×544 CPU-reference captures,
+  LiveArea packaging and GXM resource reuse. Install the corresponding
+  `dist/vita/launcher-main.vpk` for a device check.
+- Repeated guest switches must release the outgoing resources and preserve
+  the input-frame identity used by captures and replay.
 
-## Non-goals (so the platform stays honest)
-
-- No suspend/resume state for guests — resume is relaunch, the frozen
-  shot is an affordance. A KV-style `app.state` op can come later as its
-  own capability; nothing in the switch protocol presumes it.
-- No on-device code signing theater — the hash footer is integrity, not
-  security; the PSP's threat model is a memory stick.
-- No host branches for "special" apps — the launcher itself is an
-  ordinary manifest app and must stay one.
+`tools/launcher.ts scan|covers|build` generates the launcher inputs. Package
+hashes bind each validation run to its guest artifacts. Keep per-run captures,
+logs and measurements in ignored `.pocket-build/validation/` output.

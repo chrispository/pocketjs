@@ -28,19 +28,16 @@ core's software rasterizer unchanged, then:
 The 960×544 render is integer-fit centered on the actual panel (which varies by
 model), so the host works across devices without per-model configuration.
 
-See **`docs/IMPLEMENTATION.md`** in this directory for the full
-design and the ground-truth API notes.
+See [Runtime design](docs/IMPLEMENTATION.md) for module ownership and
+[Host integration](docs/INTEGRATION.md) for application packaging and boot.
 
-## Status
+## Device constraints
 
-**Work in progress** — merged early so it can be iterated on in-tree. The
-host cross-compiles to a stripped ARM ELF (glibc ≤2.18, dlopens
-`libinkview.so` at runtime), is clippy-clean, and its framebuffer/input unit
-tests pass. The `pocketbook` target is registered and `hero` builds for it
-(`bun pocket compile --target pocketbook`). **Boot, render, scale-to-fit
-centering, and animated partial updates are validated on a PocketBook Verse**
-(grayscale); input, idle ghosting, background-return, and color panels still
-need a hands-on pass — see the checklist below.
+The host targets ARM Linux with glibc 2.23 and loads `libinkview.so` at runtime.
+The grayscale PocketBook Verse is the known device configuration for rendering,
+scale-to-fit centering, and animated partial updates. **Touch and hardware-key
+behavior, idle ghosting, return from background, and color-panel output are
+untested on hardware.**
 
 ## Build
 
@@ -70,8 +67,8 @@ Notes:
 - LLVM lowers `f32::max/min` to C23 math symbols (`fmaximum_numf`, …) that
   PocketBook's glibc 2.23 predates; `build.rs` links a tiny shim
   (`src/compat.c`) providing them for the cross-build.
-- The `inkview` dependency currently points at a local checkout; switch to the
-  git dependency in `Cargo.toml` for a standalone/CI build.
+- `Cargo.toml` pins `inkview` to a git revision. A local sibling checkout is
+  not required.
 
 ## Build the app bundle
 
@@ -104,57 +101,31 @@ or restart may be needed for a new app to appear).
 | `POCKET_JS` | `app.js` | path to the JS bundle |
 | `RUST_LOG` | `info` | log filter (the host logs the panel size + geometry at startup) |
 
-## Device testing checklist
+## Controls
 
-Run on both a grayscale and a color device to exercise both blit paths.
+| Device input | Guest input |
+| --- | --- |
+| Up / Down / Left / Right | Directional buttons |
+| Prev / Next page keys | Left / Right |
+| OK / Back | Cross / Circle |
+| Menu / Home | Start / Select |
+| Plus / Minus | Right / Left trigger |
+| Touchscreen | One contact mapped to the displayed logical surface |
 
-**Boot / render**
+## Tests and logs
 
-- [x] App appears in the launcher and opens without crashing. *(Verse)*
-- [x] The `hero` UI renders, centered, with letterbox borders on the larger
-      panel. Check the startup log line
-      (`pocketbook: panel WxH, … render WxH → disp WxH +(ox,oy)`) for sane
-      geometry. On the Verse the 960×544 render is scaled to 758×429 and
-      centered vertically. *(Verse)*
-- [x] Text is crisp (font atlases are baked @2x). *(Verse)*
-- [x] **Verse (gray):** image/logo render in grayscale, no color. *(Verse)*
-- [ ] **Era Color (color):** colored UI elements actually show color.
+Run portable input and framebuffer tests from the repository root:
 
-**Input**
+```sh
+cargo test --locked --manifest-path hosts/pocketbook/Cargo.toml
+```
 
-- [ ] Touch: tapping a button activates it (touch maps physical→logical via the
-      scale-to-fit offset + displayed size).
-- [ ] Hardware keys: D-pad moves focus, OK activates, Back/Menu behave.
-- [ ] Page-turn keys (Prev/Next) map to left/right.
-
-**E-ink refresh**
-
-- [x] Small changes (button highlight / spinner) update without a full flash —
-      the hero spinner and progress bar animate via partial updates. *(Verse)*
-- [x] During animation the panel keeps up (dynamic updates), then does a clean
-      partial update when it settles (~200 ms quiet). *(Verse)*
-- [ ] No persistent ghosting after a few seconds idle (periodic cleanup works).
-- [ ] Returning from background (`Show`) does one clean full redraw.
-
-### Validated on hardware
-
-- **PocketBook Verse** (grayscale, 758×1024) — 2026-07-24. Boot, render,
-  scale-to-fit centering, @2x text, and animated partial updates all confirmed
-  via photo + video, **re-confirmed after the switch to incremental DrawList
-  damage** (`render_scaled_incremental`). The progress-bar animation now runs
-  at its intended cadence — closer to the desktop host — because the tick loop
-  no longer re-rasterizes and re-scans the whole 960×544 frame every 33 ms.
-  Input (touch / hardware keys), idle ghosting, and background-return still
-  need a hands-on pass.
-- **Era Color / Kaleido 3** — not yet tested (color blit path unverified).
-
-### Logs
+The startup log records panel dimensions, render dimensions, displayed size,
+and centering offsets. On a 758×1024 panel, the 960×544 render becomes
+758×429 and is centered vertically. Use that geometry when diagnosing touch
+offsets or clipped output.
 
 The `.app` launcher redirects the host's stdout/stderr to
 `applications/<app>/pocketjs.log` on the device storage (visible over USB), so
 the startup geometry line and any `RUST_LOG` output survive a run. Bump the
 filter with `RUST_LOG=debug` in the launcher for verbose traces.
-
-**Report back** any crash (ideally with the `pocketjs.log` contents),
-mis-render, touch offset, or excessive flicker — those drive the next
-iteration.

@@ -283,7 +283,7 @@ Determinism is the family religion, and this port kept it strict. Input is an *i
 
 The committed goldens are hash lines, fifteen per tape, because pixels would be ROM-derived. When the emulated GPU and the software rasterizer are compared image-to-image at the story's eleven marks, they agree within a documented seam-rounding tolerance; when a change is *supposed* to be invisible, the hashes say so byte-for-byte, which is what later made it safe to rip the renderer's internals out repeatedly in the name of speed.
 
-For the record, because it still surprises us: the distance from an empty directory to that whole chain green (importer parity, rules oracle, overworld, wild battles, the Rust core, the cooked pak, the sceGu EBOOT, the emulator end-to-end) **was one working session; the draft PR went up four hours and eighteen minutes after the first prompt.** Five research agents mapped the two upstreams and our own substrate in parallel; a design doc and a codegen'd, drift-guarded surface contract pinned the seams; and from there every port proceeded against an oracle instead of against hope. Thirty-four hours later the project moved out into its own repo. In between came the part no oracle covers.
+The checks covered the chain from importer parity and the rules oracle through the overworld, wild battles, Rust core, cooked pak, sceGu EBOOT, and emulator. A generated surface contract caught drift between the upstream interfaces and the port. Those checks established behavior on controlled inputs; the next step was to see what the hardware did with the same program.
 
 ## The machine disagrees
 

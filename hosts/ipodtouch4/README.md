@@ -10,8 +10,7 @@ never committed or included in the npm package.
 The wrapper requires OpenGL ES 1.1. The retained UI core and UIKit view both
 use density 2, and the host accepts only a 640×960 renderbuffer for the
 320×480 logical surface. The runtime delivers up to eight touch contacts per
-frame from its slot table; this device is the multi-touch acceptance hardware
-for the legacy Apple hosts.
+frame from its slot table.
 
 SpringBoard artwork reuses the classic PocketJS icon pipeline
 (`tools/iphone-classic-icon.ts`).

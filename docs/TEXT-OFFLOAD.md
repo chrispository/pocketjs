@@ -90,9 +90,9 @@ executes capability handlers in a real Worker in both modes. `--font` is optiona
 and exposes only explicitly supplied OpenType families. Shaping support does
 not automatically replace an application's baked theme text rendering.
 
-This is an experimental framework implementation. PSP release compilation and
-host-side companion tests are distinct from physical-device pairing and latency
-acceptance. CPU rasterization has no GPU acceleration or platform font fallback.
+**This text service is experimental.** Host-side tests do not measure device
+pairing or input latency. CPU rasterization has no GPU acceleration or platform
+font fallback.
 
 ## Interactive latency
 
