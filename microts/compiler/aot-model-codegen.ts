@@ -464,6 +464,13 @@ class ModelRust {
           }
           return this.own(rf(object, e.name), memberType);
         };
+        // A field below an element, such as items[i].x, is read in place rather than
+        // after copying the element.
+        const chain = declaration?.kind === "struct" && e.object.type.kind !== "option" && !this.borrow(e.object) ? this.readChain(e) : undefined;
+        if (chain) {
+          const value = rm(chain.value, "cloned");
+          return block(chain.statements, e.type.kind === "option" ? value : rm(value, "unwrap_or_else", { kind: "closure", params: [], body: this.defaultValue(e.type) }));
+        }
         const object = declaration?.kind === "struct" && e.object.type.kind !== "option" ? this.borrow(e.object) ?? this.expr(e.object) : this.expr(e.object);
         if (e.object.type.kind === "option") return e.optional
           ? rm(object, "map", { kind: "closure", params: [rn("value")], body: extract(rp("value")) })
