@@ -25,6 +25,8 @@
         ],
         "presentation": "integer-fit"
       }
-    }
+    },
+    "aot": true,
+    "model": "compiled"
   }
 }
