@@ -23,3 +23,6 @@ taffy = { version = "0.11", default-features = false, features = [
 
 [features]
 default = []
+# Layout work counters and the fresh-solver validation hook used by the
+# differential tests. Ordinary builds compile neither.
+counters = []

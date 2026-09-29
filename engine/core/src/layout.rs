@@ -1,11 +1,9 @@
 //! taffy integration: resolved styles -> taffy::Style, text measure
 //! functions, dirty tracking and rounded layout readback.
 //!
-//! Strategy (v1, documented): the taffy tree is REBUILT from scratch on every
-//! relayout instead of incrementally synced. Relayouts only happen when the
-//! dirty flag is set (structure/layout-prop mutations, layout-prop animation
-//! frames), and UI trees on a 480x272 screen are small, so the rebuild is
-//! well inside budget and keeps the sync logic trivially correct.
+//! The projected Taffy tree persists across relayouts. Structural sync keeps
+//! unchanged handles, styles and text contexts; Taffy invalidates changed
+//! nodes and their ancestors, then reuses cached child layouts during solve.
 //!
 //! Text nodes: a text ELEMENT becomes a taffy measure leaf over its
 //! concatenated inline run; text children of a text element are absorbed into
@@ -33,9 +31,35 @@ pub struct MeasureCtx {
     /// shaping is the expensive half of layout on the PSP; the taffy
     /// measure closure must never re-shape per solve pass.
     pub size: (f32, f32),
+    native: bool,
+    environment_epoch: u64,
+    /// Replaying an unchanged measurement must preserve the public missing
+    /// glyph counter, even though no shaping work is repeated.
+    misses: u32,
 }
 
 impl MeasureCtx {
+    fn matches(
+        &self,
+        text: &str,
+        slot: u8,
+        tracking: f32,
+        line_height: f32,
+        native: bool,
+    ) -> bool {
+        self.text == text
+            && self.slot == slot
+            && self.native == native
+            && float_key(self.tracking) == float_key(tracking)
+            && float_key(self.line_height) == float_key(line_height)
+    }
+
+    fn replay_misses(&self, fonts: &Fonts) {
+        fonts
+            .misses
+            .set(fonts.misses.get().wrapping_add(self.misses));
+    }
+
     fn shaped(
         fonts: &Fonts,
         text: String,
@@ -44,16 +68,42 @@ impl MeasureCtx {
         line_height: f32,
         native: bool,
     ) -> MeasureCtx {
+        let before = fonts.misses.get();
         let size = fonts.measure_run_provider(native, &text, slot, tracking, line_height);
-        MeasureCtx { text, slot, tracking, line_height, size }
+        MeasureCtx {
+            text,
+            slot,
+            tracking,
+            line_height,
+            size,
+            native,
+            environment_epoch: 0,
+            misses: fonts.misses.get().wrapping_sub(before),
+        }
     }
+}
+
+fn float_key(value: f32) -> u32 {
+    if value.is_nan() {
+        f32::NAN.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LayoutEntry {
+    /// Includes the arena generation: a reused slot is a different node.
+    id: i32,
+    handle: taffy::NodeId,
+    active: bool,
+    declares_transform: bool,
 }
 
 /// The layout engine: one TaffyTree + the dirty flag.
 pub struct LayoutEngine {
     pub taffy: TaffyTree<MeasureCtx>,
-    /// STRUCTURE dirty: the taffy tree must be rebuilt from scratch (node
-    /// inserts/removes/destroys, text content changes, table/font swaps).
+    /// Reconcile the projected structure and resolved styles before solving.
     pub dirty: bool,
     /// STYLE dirty slots: nodes whose resolved style changed but whose place
     /// in the tree did not — relayout restyles just these in the live taffy
@@ -68,6 +118,14 @@ pub struct LayoutEngine {
     /// Layout viewport in px. Defaults to the PSP screen; desktop hosts set it
     /// through `Ui::set_viewport` (the draw clip stage uses the same bounds).
     pub viewport: (f32, f32),
+    entries: Vec<Option<LayoutEntry>>,
+    environment_epoch: u64,
+    other_output_root: Option<i32>,
+    solved_viewport: Option<(u32, u32)>,
+    #[cfg(feature = "counters")]
+    reference_rebuild: bool,
+    #[cfg(feature = "counters")]
+    pub counters: crate::counters::LayoutCounters,
 }
 
 impl Default for LayoutEngine {
@@ -77,6 +135,39 @@ impl Default for LayoutEngine {
 }
 
 impl LayoutEngine {
+    /// Structure changes retain existing nodes and their measurement caches.
+    pub fn mark_structure(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Font tables and provider functions can change without changing text.
+    pub fn invalidate_measurements(&mut self) {
+        self.environment_epoch = self.environment_epoch.wrapping_add(1);
+        self.dirty = true;
+    }
+
+    /// The other output shares the arena but owns its own projected graph.
+    /// A detached subtree has no output root and can keep its cached handles.
+    pub(crate) fn set_other_output_root(&mut self, root: i32) {
+        self.other_output_root = Some(root);
+        self.dirty = true;
+    }
+
+    /// Differential-test oracle: drop the retained tree and rebuild it with
+    /// the original recursive builder on the next relayout.
+    #[cfg(feature = "counters")]
+    pub fn force_rebuild_for_validation(&mut self) {
+        self.taffy = TaffyTree::new();
+        self.entries.clear();
+        self.style_dirty.clear();
+        self.root = None;
+        self.built = false;
+        self.dirty = true;
+        self.solved_viewport = None;
+        self.counters.taffy_nodes = 0;
+        self.reference_rebuild = true;
+    }
+
     /// Mark one node style-dirty (cheap; deduped at relayout).
     pub fn mark_style(&mut self, slot: u32) {
         self.style_dirty.push(slot);
@@ -95,6 +186,14 @@ impl LayoutEngine {
             built: false,
             root: None,
             viewport: (spec::SCREEN_W as f32, spec::SCREEN_H as f32),
+            entries: Vec::new(),
+            environment_epoch: 0,
+            other_output_root: None,
+            solved_viewport: None,
+            #[cfg(feature = "counters")]
+            reference_rebuild: false,
+            #[cfg(feature = "counters")]
+            counters: crate::counters::LayoutCounters::default(),
         }
     }
 }
@@ -242,6 +341,7 @@ pub fn to_taffy(r: &Resolved) -> taffy::Style {
 /// down the tree: text under one keeps the baked measurement pair, and the
 /// choice is RECORDED on the node (`Node::text_native`) so paint follows
 /// the provider that sized the box — never a mid-frame re-decision.
+#[cfg(feature = "counters")]
 fn build(
     tree: &mut Tree,
     styles: &StyleTable,
@@ -249,6 +349,7 @@ fn build(
     taffy: &mut TaffyTree<MeasureCtx>,
     slot: u32,
     in_transform: bool,
+    counters: &mut crate::counters::LayoutCounters,
 ) -> Option<taffy::NodeId> {
     let resolved = style::resolve(&tree.slots[slot as usize], styles, true);
     let in_transform = in_transform || resolved.declares_transform();
@@ -271,7 +372,10 @@ fn build(
             resolved.line_height,
             native,
         );
+        counters.shaping_calls = counters.shaping_calls.saturating_add(1);
         let nid = taffy.new_leaf_with_context(to_taffy(&resolved), ctx).ok()?;
+        counters.taffy_nodes_created = counters.taffy_nodes_created.saturating_add(1);
+        counters.taffy_nodes += 1;
         tree.slots[slot as usize].taffy = Some(nid);
         return Some(nid);
     }
@@ -279,46 +383,300 @@ fn build(
     let mut kids: Vec<taffy::NodeId> = Vec::with_capacity(children.len());
     for c in children {
         if let Some(cs) = tree.resolve(c) {
-            if let Some(k) = build(tree, styles, fonts, taffy, cs, in_transform) {
+            if let Some(k) = build(tree, styles, fonts, taffy, cs, in_transform, counters) {
                 kids.push(k);
             }
         }
     }
     let nid = taffy.new_with_children(to_taffy(&resolved), &kids).ok()?;
+    counters.taffy_nodes_created = counters.taffy_nodes_created.saturating_add(1);
+    counters.taffy_nodes += 1;
     tree.slots[slot as usize].taffy = Some(nid);
     Some(nid)
 }
 
-/// Copy rounded layout output back into the node tree (flat pass — layouts
-/// are parent-relative, so order does not matter; no per-node allocations).
-fn readback(tree: &mut Tree, taffy: &TaffyTree<MeasureCtx>, root_id: i32) {
-    let mut slots = Vec::new();
-    tree.collect_subtree(root_id, &mut slots);
-    for slot in slots {
-        let node = &mut tree.slots[slot as usize];
-        match node.taffy {
-            Some(nid) => {
-                if let Ok(l) = taffy.layout(nid) {
-                    node.layout = LayoutRect {
-                        x: roundf(l.location.x),
-                        y: roundf(l.location.y),
-                        w: roundf(l.size.width),
-                        h: roundf(l.size.height),
-                    };
+/// Compare the normalized layout projection, excluding paint-only fields.
+/// Defaults such as auto/NaN are normalized by `to_taffy`; the two plain
+/// floating-point flex factors need an explicit NaN-stable comparison.
+fn styles_match(a: &taffy::Style, b: &taffy::Style) -> bool {
+    if float_key(a.flex_grow) != float_key(b.flex_grow)
+        || float_key(a.flex_shrink) != float_key(b.flex_shrink)
+    {
+        return false;
+    }
+    if !a.flex_grow.is_nan() && !a.flex_shrink.is_nan() {
+        return a == b;
+    }
+    let mut a = a.clone();
+    let mut b = b.clone();
+    a.flex_grow = 0.0;
+    a.flex_shrink = 0.0;
+    b.flex_grow = 0.0;
+    b.flex_shrink = 0.0;
+    a == b
+}
+
+fn entry(eng: &LayoutEngine, tree: &Tree, slot: u32) -> Option<LayoutEntry> {
+    let node = tree.slots.get(slot as usize)?;
+    eng.entries
+        .get(slot as usize)
+        .copied()
+        .flatten()
+        .filter(|entry| node.alive && entry.id == node.id(slot))
+}
+
+fn update_style(eng: &mut LayoutEngine, handle: taffy::NodeId, resolved: &Resolved) {
+    let next = to_taffy(resolved);
+    if eng
+        .taffy
+        .style(handle)
+        .is_ok_and(|old| styles_match(old, &next))
+    {
+        return;
+    }
+    let _ = eng.taffy.set_style(handle, next);
+    #[cfg(feature = "counters")]
+    {
+        eng.counters.style_updates = eng.counters.style_updates.saturating_add(1);
+    }
+}
+
+fn update_measure(
+    eng: &mut LayoutEngine,
+    fonts: &Fonts,
+    handle: taffy::NodeId,
+    run: String,
+    resolved: &Resolved,
+    native: bool,
+    replay_misses: bool,
+) {
+    if let Some(context) = eng.taffy.get_node_context(handle) {
+        if context.environment_epoch == eng.environment_epoch {
+            if context.matches(
+                &run,
+                resolved.font_slot as u8,
+                resolved.tracking,
+                resolved.line_height,
+                native,
+            ) {
+                if replay_misses {
+                    context.replay_misses(fonts);
                 }
+                return;
             }
-            None => node.layout = LayoutRect::default(),
+        }
+    }
+    let mut context = MeasureCtx::shaped(
+        fonts,
+        run,
+        resolved.font_slot as u8,
+        resolved.tracking,
+        resolved.line_height,
+        native,
+    );
+    context.environment_epoch = eng.environment_epoch;
+    #[cfg(feature = "counters")]
+    {
+        eng.counters.shaping_calls = eng.counters.shaping_calls.saturating_add(1);
+    }
+    let _ = eng.taffy.set_node_context(handle, Some(context));
+}
+
+/// Taffy's remove() does not release its secondary context map or dirty the
+/// former parent. Do both explicitly before removing a destroyed generation.
+fn retire_dead(tree: &Tree, eng: &mut LayoutEngine) {
+    for slot in 0..eng.entries.len() {
+        let Some(old) = eng.entries[slot] else {
+            continue;
+        };
+        if tree.resolve(old.id).is_some() {
+            continue;
+        }
+        retire_entry(eng, slot, old);
+    }
+}
+
+fn retire_entry(eng: &mut LayoutEngine, slot: usize, old: LayoutEntry) {
+    let _ = eng.taffy.set_node_context(old.handle, None);
+    let _ = eng.taffy.set_children(old.handle, &[]);
+    let _ = eng.taffy.remove(old.handle);
+    eng.entries[slot] = None;
+    #[cfg(feature = "counters")]
+    {
+        eng.counters.taffy_nodes = eng.counters.taffy_nodes.saturating_sub(1);
+    }
+}
+
+fn retire_unprojected(tree: &Tree, eng: &mut LayoutEngine, root_id: i32) {
+    for slot in 0..eng.entries.len() {
+        let Some(old) = eng.entries[slot] else {
+            continue;
+        };
+        if !old.active
+            && (tree.is_in_subtree(root_id, old.id)
+                || eng
+                    .other_output_root
+                    .is_some_and(|other| tree.is_in_subtree(other, old.id)))
+        {
+            retire_entry(eng, slot, old);
         }
     }
 }
 
-fn compute(
+/// Reconcile the projected tree while preserving every unchanged Taffy node.
+/// Text elements terminate traversal: their inline descendants belong to a
+/// single measurement leaf, and empty runs occupy no flex item or gap.
+fn sync_node(
     tree: &mut Tree,
-    _fonts: &Fonts,
+    styles: &StyleTable,
+    fonts: &Fonts,
     eng: &mut LayoutEngine,
-    root_id: i32,
-    root_nid: taffy::NodeId,
-) {
+    slot: u32,
+    in_transform: bool,
+    replay_all_misses: bool,
+    style_dirty: &[u32],
+) -> Option<taffy::NodeId> {
+    let resolved = style::resolve(&tree.slots[slot as usize], styles, true);
+    let declares_transform = resolved.declares_transform();
+    let in_transform = in_transform || declares_transform;
+    let is_text = tree.slots[slot as usize].node_type == spec::NodeType::Text as u8;
+    let mut run = String::new();
+    if is_text {
+        tree.collect_run(slot, &mut run);
+        if run.is_empty() {
+            return None;
+        }
+    }
+    let native = is_text && fonts.native_active() && resolved.tracking == 0.0 && !in_transform;
+    let old = entry(eng, tree, slot);
+    let handle = if let Some(old) = old {
+        update_style(eng, old.handle, &resolved);
+        if is_text {
+            update_measure(
+                eng,
+                fonts,
+                old.handle,
+                run,
+                &resolved,
+                native,
+                replay_all_misses || style_dirty.binary_search(&slot).is_ok(),
+            );
+        }
+        old.handle
+    } else {
+        let handle = if is_text {
+            let mut context = MeasureCtx::shaped(
+                fonts,
+                run,
+                resolved.font_slot as u8,
+                resolved.tracking,
+                resolved.line_height,
+                native,
+            );
+            context.environment_epoch = eng.environment_epoch;
+            #[cfg(feature = "counters")]
+            {
+                eng.counters.shaping_calls = eng.counters.shaping_calls.saturating_add(1);
+            }
+            eng.taffy
+                .new_leaf_with_context(to_taffy(&resolved), context)
+                .ok()?
+        } else {
+            eng.taffy.new_leaf(to_taffy(&resolved)).ok()?
+        };
+        #[cfg(feature = "counters")]
+        {
+            eng.counters.taffy_nodes_created = eng.counters.taffy_nodes_created.saturating_add(1);
+            eng.counters.taffy_nodes = eng.counters.taffy_nodes.saturating_add(1);
+        }
+        handle
+    };
+    eng.entries[slot as usize] = Some(LayoutEntry {
+        id: tree.slots[slot as usize].id(slot),
+        handle,
+        active: true,
+        declares_transform,
+    });
+    if is_text {
+        tree.slots[slot as usize].text_native = native;
+    } else {
+        let children = tree.slots[slot as usize].children.clone();
+        let mut projected = Vec::with_capacity(children.len());
+        for child in children {
+            if let Some(child_slot) = tree.resolve(child) {
+                if let Some(child_handle) = sync_node(
+                    tree,
+                    styles,
+                    fonts,
+                    eng,
+                    child_slot,
+                    in_transform,
+                    replay_all_misses,
+                    style_dirty,
+                ) {
+                    projected.push(child_handle);
+                }
+            }
+        }
+        // set_children also detaches moves from their old parent and dirties
+        // both ancestor chains. Calling it for an unchanged list loses cache.
+        if !eng.taffy.children(handle).is_ok_and(|old| old == projected) {
+            let _ = eng.taffy.set_children(handle, &projected);
+        }
+    }
+    Some(handle)
+}
+
+fn in_transform(tree: &Tree, styles: &StyleTable, slot: u32, root_id: i32) -> bool {
+    let mut current = Some(slot);
+    while let Some(slot) = current {
+        let node = &tree.slots[slot as usize];
+        if style::resolve(node, styles, true).declares_transform() {
+            return true;
+        }
+        if node.id(slot) == root_id {
+            break;
+        }
+        current = tree.resolve(node.parent);
+    }
+    false
+}
+
+/// Copy rounded layout output using this engine's generation-tagged mapping.
+/// Node::taffy remains a compatibility view, never an input to another output.
+fn readback(tree: &mut Tree, eng: &LayoutEngine, root_id: i32) {
+    let mut slots = Vec::new();
+    tree.collect_subtree(root_id, &mut slots);
+    for slot in slots {
+        let handle = entry(eng, tree, slot)
+            .filter(|entry| entry.active)
+            .map(|entry| entry.handle);
+        let node = &mut tree.slots[slot as usize];
+        node.taffy = handle;
+        node.layout = handle
+            .and_then(|handle| eng.taffy.layout(handle).ok())
+            .map(|layout| LayoutRect {
+                x: roundf(layout.location.x),
+                y: roundf(layout.location.y),
+                w: roundf(layout.size.width),
+                h: roundf(layout.size.height),
+            })
+            .unwrap_or_default();
+        if node.node_type == spec::NodeType::Text as u8 {
+            node.text_native = handle
+                .and_then(|handle| eng.taffy.get_node_context(handle))
+                .is_some_and(|context| context.native);
+        }
+    }
+}
+
+fn compute(tree: &mut Tree, eng: &mut LayoutEngine, root_id: i32, root_nid: taffy::NodeId) {
+    #[cfg(feature = "counters")]
+    {
+        eng.counters.layout_passes = eng.counters.layout_passes.saturating_add(1);
+    }
+    #[cfg(feature = "counters")]
+    let mut callbacks = 0u64;
     let _ = eng.taffy.compute_layout_with_measure(
         root_nid,
         Size {
@@ -326,29 +684,39 @@ fn compute(
             height: AvailableSpace::Definite(eng.viewport.1),
         },
         |known, _available, _id, ctx, _style| -> Size<f32> {
+            #[cfg(feature = "counters")]
+            {
+                callbacks = callbacks.saturating_add(1);
+            }
             match ctx {
                 Some(m) => Size {
                     width: known.width.unwrap_or(m.size.0),
                     height: known.height.unwrap_or(m.size.1),
                 },
-                None => Size { width: 0.0, height: 0.0 },
+                None => Size {
+                    width: 0.0,
+                    height: 0.0,
+                },
             }
         },
     );
-    readback(tree, &eng.taffy, root_id);
+    #[cfg(feature = "counters")]
+    {
+        eng.counters.measure_callbacks = eng.counters.measure_callbacks.saturating_add(callbacks);
+    }
+    eng.solved_viewport = Some((eng.viewport.0.to_bits(), eng.viewport.1.to_bits()));
+    // Taffy still rounds the complete tree against cumulative raw positions;
+    // a cached child's pixel rounding can change when an ancestor moves.
+    readback(tree, eng, root_id);
 }
 
-/// Relayout. STYLE-only dirt restyles the dirty nodes in the LIVE taffy tree
-/// (taffy recomputes just the affected subtrees — this is what keeps
-/// layout-prop keyframe animations 60 Hz on the PSP); STRUCTURE dirt rebuilds
-/// the tree from scratch.
 pub fn relayout(tree: &mut Tree, styles: &StyleTable, fonts: &Fonts, eng: &mut LayoutEngine) {
     relayout_root(tree, styles, fonts, eng, spec::ROOT_ID);
 }
 
-/// Relayout one independent output root. Auxiliary roots share the arena and
-/// resource tables with the primary tree, but keep separate taffy state and
-/// viewport bounds.
+/// Relayout one independent output root. Ordinary structure changes reconcile
+/// the projection; style-only changes touch their existing nodes. Both paths
+/// compute from the root so Taffy's constraint-keyed cache remains authoritative.
 pub fn relayout_root(
     tree: &mut Tree,
     styles: &StyleTable,
@@ -356,78 +724,136 @@ pub fn relayout_root(
     eng: &mut LayoutEngine,
     root_id: i32,
 ) {
-    if !eng.dirty && eng.built {
-        if eng.style_dirty.is_empty() {
-            return;
+    if !eng.needs() && eng.built {
+        return;
+    }
+    #[cfg(feature = "counters")]
+    if eng.reference_rebuild {
+        eng.reference_rebuild = false;
+        reference_rebuild(tree, styles, fonts, eng, root_id);
+        return;
+    }
+    eng.style_dirty.sort_unstable();
+    eng.style_dirty.dedup();
+    let dirty = core::mem::take(&mut eng.style_dirty);
+    let replay_all_misses = eng.dirty || !eng.built;
+    // An ancestor's transform changes the text measurement provider. Revisit
+    // that projection even when its own normalized flex style is unchanged.
+    let transform_changed = dirty.iter().any(|&slot| {
+        entry(eng, tree, slot).is_some_and(|old| {
+            old.active
+                && old.declares_transform
+                    != style::resolve(&tree.slots[slot as usize], styles, true).declares_transform()
+        })
+    });
+    if eng.dirty || !eng.built || transform_changed {
+        #[cfg(feature = "counters")]
+        {
+            eng.counters.structure_syncs = eng.counters.structure_syncs.saturating_add(1);
+            if !eng.built {
+                eng.counters.structure_rebuilds = eng.counters.structure_rebuilds.saturating_add(1);
+            }
         }
-        eng.style_dirty.sort_unstable();
-        eng.style_dirty.dedup();
-        let dirty = core::mem::take(&mut eng.style_dirty);
-        for &slot in &dirty {
-            if !tree.slots[slot as usize].alive {
-                continue;
+        retire_dead(tree, eng);
+        eng.entries.resize(tree.slots.len(), None);
+        for item in eng.entries.iter_mut().flatten() {
+            item.active = false;
+        }
+        eng.root = tree.resolve(root_id).and_then(|slot| {
+            sync_node(
+                tree,
+                styles,
+                fonts,
+                eng,
+                slot,
+                false,
+                replay_all_misses,
+                &dirty,
+            )
+        });
+        retire_unprojected(tree, eng, root_id);
+        if let Some(handle) = eng.root {
+            if let Some(parent) = eng.taffy.parent(handle) {
+                let _ = eng.taffy.remove_child(parent, handle);
             }
-            let node_id = tree.slots[slot as usize].id(slot);
-            if !tree.is_in_subtree(root_id, node_id) {
-                continue;
-            }
-            let Some(nid) = tree.slots[slot as usize].taffy else {
-                // Not part of the built tree: detached subtrees relayout on
-                // re-insert (structure dirty), and excluded empty text runs
-                // only re-enter through set_text (also structure dirty).
+        }
+        eng.built = true;
+        eng.dirty = false;
+    } else {
+        for slot in dirty {
+            let Some(old) = entry(eng, tree, slot).filter(|entry| entry.active) else {
                 continue;
             };
             let resolved = style::resolve(&tree.slots[slot as usize], styles, true);
+            update_style(eng, old.handle, &resolved);
             if tree.slots[slot as usize].node_type == spec::NodeType::Text as u8 {
                 let mut run = String::new();
                 tree.collect_run(slot, &mut run);
-                // A restyle keeps the RECORDED provider (it has no ancestor
-                // context to re-derive the transform gate); only a node-local
-                // tracking change can flip the record — to the baked pair,
-                // which handles tracking (native shaping does not).
-                let native = tree.slots[slot as usize].text_native && resolved.tracking == 0.0;
-                tree.slots[slot as usize].text_native = native;
-                let ctx = MeasureCtx::shaped(
-                    fonts,
-                    run,
-                    resolved.font_slot as u8,
-                    resolved.tracking,
-                    resolved.line_height,
-                    native,
-                );
-                let _ = eng.taffy.set_node_context(nid, Some(ctx));
+                let native = fonts.native_active()
+                    && resolved.tracking == 0.0
+                    && !in_transform(tree, styles, slot, root_id);
+                update_measure(eng, fonts, old.handle, run, &resolved, native, true);
             }
-            let _ = eng.taffy.set_style(nid, to_taffy(&resolved));
         }
-        if let Some(root_nid) = eng.root {
-            compute(tree, fonts, eng, root_id, root_nid);
-            return;
-        }
-        eng.dirty = true; // no built root (should not happen) — full rebuild
     }
-    eng.taffy.clear();
-    eng.style_dirty.clear();
-    let mut surface_slots = Vec::new();
-    tree.collect_subtree(root_id, &mut surface_slots);
-    for &slot in &surface_slots {
+    if let Some(root) = eng.root {
+        if eng.taffy.dirty(root).unwrap_or(true)
+            || eng.solved_viewport != Some((eng.viewport.0.to_bits(), eng.viewport.1.to_bits()))
+        {
+            compute(tree, eng, root_id, root);
+        } else {
+            readback(tree, eng, root_id);
+        }
+    } else {
+        readback(tree, eng, root_id);
+    }
+}
+
+/// Original recursive builder retained as an independent projection oracle.
+#[cfg(feature = "counters")]
+fn reference_rebuild(
+    tree: &mut Tree,
+    styles: &StyleTable,
+    fonts: &Fonts,
+    eng: &mut LayoutEngine,
+    root_id: i32,
+) {
+    eng.counters.structure_rebuilds = eng.counters.structure_rebuilds.saturating_add(1);
+    let mut slots = Vec::new();
+    tree.collect_subtree(root_id, &mut slots);
+    for &slot in &slots {
         tree.slots[slot as usize].taffy = None;
     }
-    let Some(root_slot) = tree.resolve(root_id) else {
-        eng.dirty = false;
-        eng.built = false;
-        eng.root = None;
-        return;
-    };
-    let Some(root_nid) = build(tree, styles, fonts, &mut eng.taffy, root_slot, false) else {
-        eng.dirty = false;
-        eng.built = false;
-        eng.root = None;
-        return;
-    };
-    eng.root = Some(root_nid);
+    eng.root = tree.resolve(root_id).and_then(|slot| {
+        build(
+            tree,
+            styles,
+            fonts,
+            &mut eng.taffy,
+            slot,
+            false,
+            &mut eng.counters,
+        )
+    });
+    eng.entries.resize(tree.slots.len(), None);
+    for slot in slots {
+        let node = &tree.slots[slot as usize];
+        if let Some(handle) = node.taffy {
+            eng.entries[slot as usize] = Some(LayoutEntry {
+                id: node.id(slot),
+                handle,
+                active: true,
+                declares_transform: style::resolve(node, styles, true).declares_transform(),
+            });
+        }
+    }
     eng.built = true;
     eng.dirty = false;
-    compute(tree, fonts, eng, root_id, root_nid);
+    if let Some(root) = eng.root {
+        compute(tree, eng, root_id, root);
+    } else {
+        readback(tree, eng, root_id);
+    }
 }
 
 /// Smoke helper proving the pinned taffy feature set

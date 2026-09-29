@@ -119,7 +119,7 @@ impl Ui {
             }
         }
         handles.copy_from_slice(&staged_handles);
-        self.layout.dirty = true;
+        self.mark_layout_dirty();
         self.bump_raster_revision();
         Ok(())
     }

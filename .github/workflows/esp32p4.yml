@@ -30,5 +30,8 @@ jobs:
       - name: Test RGB565 core rasterizer
         run: cargo test --locked --manifest-path engine/core/Cargo.toml
 
+      - name: Test retained layout against a fresh solver
+        run: cargo test --locked --manifest-path engine/core/Cargo.toml --features counters
+
       - name: Test ESP32-P4 DrawList backend
         run: cargo test --locked --manifest-path engine/backends/rgb565/Cargo.toml

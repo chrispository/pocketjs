@@ -45,6 +45,8 @@ use alloc::vec::Vec;
 
 pub mod anim;
 pub mod codec;
+#[cfg(feature = "counters")]
+pub mod counters;
 pub mod damage;
 pub mod draw;
 mod fmath;
@@ -414,10 +416,21 @@ impl Ui {
         self.raster_revision = self.raster_revision.wrapping_add(1);
     }
 
+    /// Fonts, text providers or styles changed: every retained text
+    /// measurement is stale.
     fn mark_layout_dirty(&mut self) {
-        self.layout.dirty = true;
+        self.layout.invalidate_measurements();
         if let Some(auxiliary) = self.auxiliary.as_mut() {
-            auxiliary.layout.dirty = true;
+            auxiliary.layout.invalidate_measurements();
+        }
+    }
+
+    /// Nodes moved, appeared or disappeared: reconcile the retained trees and
+    /// keep unchanged nodes and measurements.
+    fn mark_layout_structure(&mut self) {
+        self.layout.mark_structure();
+        if let Some(auxiliary) = self.auxiliary.as_mut() {
+            auxiliary.layout.mark_structure();
         }
     }
 
@@ -461,6 +474,8 @@ impl Ui {
         }
         let mut surface_layout = layout::LayoutEngine::new();
         surface_layout.viewport = (width, height);
+        surface_layout.set_other_output_root(spec::ROOT_ID);
+        self.layout.set_other_output_root(root);
         self.auxiliary = Some(AuxiliarySurface {
             root,
             layout: surface_layout,
@@ -507,7 +522,7 @@ impl Ui {
             self.anims.kill_node(nid);
             self.tree.free_slot(slot);
         }
-        self.mark_layout_dirty();
+        self.mark_layout_structure();
     }
 
     /// Insert `child` under `parent` before `anchor` (0 = append). DOM move
@@ -517,7 +532,7 @@ impl Ui {
             return;
         }
         if self.tree.insert_before(parent, child, anchor) {
-            self.mark_layout_dirty();
+            self.mark_layout_structure();
         }
     }
 
@@ -525,7 +540,7 @@ impl Ui {
     /// during reorder; the JS renderer sweep destroys still-detached nodes).
     pub fn remove_child(&mut self, parent: i32, child: i32) {
         if self.tree.remove_child(parent, child) {
-            self.mark_layout_dirty();
+            self.mark_layout_structure();
         }
     }
 
@@ -632,7 +647,7 @@ impl Ui {
         run.clear();
         self.tree.collect_run(root_slot, &mut run);
         if was_empty != run.is_empty() {
-            self.mark_layout_dirty();
+            self.mark_layout_structure();
         } else if !run.is_empty() {
             // A text swap inside a FIXED cell (definite px width AND height
             // on the layout leaf) cannot move layout — the measure result is
@@ -1660,7 +1675,7 @@ impl Ui {
         );
         let (mut target, mut drawn) = (target, drawn);
         if provider_stale {
-            auxiliary.layout.dirty = true;
+            auxiliary.layout.invalidate_measurements();
             layout::relayout_root(
                 &mut self.tree,
                 &self.styles,
@@ -1747,6 +1762,36 @@ impl Ui {
     /// cmap-miss count (unmapped codepoints rendered as tofu).
     pub fn glyph_misses(&self) -> u32 {
         self.fonts.misses.get()
+    }
+
+    /// Layout work of the main and auxiliary outputs since the last reset.
+    #[cfg(feature = "counters")]
+    pub fn layout_counters(&self) -> counters::LayoutCounters {
+        let mut counts = self.layout.counters;
+        if let Some(auxiliary) = &self.auxiliary {
+            counts.add(auxiliary.layout.counters);
+        }
+        counts
+    }
+
+    /// Clear the layout totals; the live Taffy node count is kept.
+    #[cfg(feature = "counters")]
+    pub fn reset_counters(&mut self) {
+        self.layout.counters.reset();
+        if let Some(auxiliary) = &mut self.auxiliary {
+            auxiliary.layout.counters.reset();
+        }
+    }
+
+    /// Rebuild the next layout with a fresh Taffy tree. Differential tests use
+    /// this to compare retained synchronization with a full rebuild.
+    #[cfg(feature = "counters")]
+    #[doc(hidden)]
+    pub fn force_layout_rebuild_for_validation(&mut self) {
+        self.layout.force_rebuild_for_validation();
+        if let Some(auxiliary) = &mut self.auxiliary {
+            auxiliary.layout.force_rebuild_for_validation();
+        }
     }
 
     // ---- DevTools ops (spec ops 18..22, docs/DEVTOOLS.md) ------------------------
