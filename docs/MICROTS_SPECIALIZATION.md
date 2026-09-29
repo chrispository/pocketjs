@@ -23,6 +23,16 @@ The report lists component call sites, node bindings, per-property style candida
 
 **A passing region criterion requires an environment contract before activation.** The generated application activates queued roots after their initial update, lifecycle effects, and commands, before layout. This order also applies to roots created by later conditional or keyed-list updates.
 
+## Retained layout synchronization
+
+**The general core layout path retains its Taffy tree across structural updates.** This applies to the primary and auxiliary outputs, with or without MicroTS specialization. A generation-tagged UI node keeps its layout handle while it remains in the solver. Insertion creates new layout nodes; removal and reordering update child lists. Destroyed nodes release their measurement contexts and handles before those slots can supply another node's layout.
+
+Structural synchronization projects the current UI tree into layout nodes. A Text element owns one measured leaf for its concatenated inline run; an empty run has no layout leaf. Moving inline text updates its old and new measurement owners. Each output owns its handle map, so a move between outputs cannot reuse a handle from another Taffy tree.
+
+**Only changed layout styles and text measurement inputs invalidate Taffy caches.** Paint changes whose resolved layout inputs are equal skip the solver. Measurement inputs include the text, font slot, tracking, line height and provider choice. Font or provider replacement invalidates retained measurements. Reuse preserves the missing-glyph increments of the replaced measurement work. Root computation lets Taffy propagate changes through auto sizing and flex constraints while reusing child results whose constraints still match.
+
+Structural projection, layout rounding and result readback still visit the tree. This implementation removes repeated node construction and unchanged text shaping; it does not guarantee work proportional to the number of changed nodes. `Show` branches retain their mount, unmount, ref and cleanup behavior. The opt-in region solvers below retain their separate boundary, wrapper and baked-layout handling; structural changes there rebuild the affected solver.
+
 ## Environment and layout regions
 
 The native build accepts `specializationEnvironment` with `viewport`, `tickRate`, and `fontAtlases: [{ slot, bytes }]`. Generated `prepare_specialization(&mut ui)` must run **before the host loads styles and font assets**. The opt-in core records SHA-256 identities of the loaded bytes. Missing identities, different bytes, a viewport or tick-rate mismatch, a native text provider, or streaming font data disable the dependent region path. Generated `specialization_diagnostics()` exposes the reason outside the model command channel. A later mismatch disables regions until the application is mounted again.
@@ -58,6 +68,8 @@ app.ui_mut().reset_counters();
 ```
 
 `reset_counters` clears accumulated UI and core work. Live Taffy-node counts and cache bytes remain gauges. Draw counters separate total words from `generated_words`, region hits, and static-plan hits. Shape counters separate cache hits from shaping calls. `DamageTracker` owns its counter snapshot and reset operation.
+
+`structure_rebuilds` counts fresh Taffy trees; `structure_syncs` counts retained topology reconciliations. `layout_passes` counts root computations and `measure_callbacks` counts the leaf measurements Taffy requests. The `counters` feature also exposes `force_layout_rebuild_for_validation()` for comparison against fresh tree construction.
 
 `segment_table_bytes` counts the allocated capacities of the current draw segment table and the segment tables retained in region caches. The word budget excludes this metadata; the gauge exposes that cost alongside `region_cache_bytes`.
 
