@@ -667,6 +667,8 @@ fn solve(
     solver.engine.dirty = false;
     let viewport = placement.map_or(solver.engine.viewport, |p| p.size);
     let root = solver.wrapper.or(solver.engine.root).unwrap();
+    #[cfg(feature = "counters")]
+    { solver.engine.counters.layout_passes = solver.engine.counters.layout_passes.saturating_add(1); }
     let _ = solver.engine.taffy.compute_layout_with_measure(
         root,
         Size {
@@ -674,6 +676,8 @@ fn solve(
             height: AvailableSpace::Definite(viewport.1),
         },
         |known, _, _, context, _| {
+            #[cfg(feature = "counters")]
+            { solver.engine.counters.measure_callbacks = solver.engine.counters.measure_callbacks.saturating_add(1); }
             let size = context.map_or((0.0, 0.0), |context| context.size);
             Size {
                 width: known.width.unwrap_or(size.0),

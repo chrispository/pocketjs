@@ -416,9 +416,9 @@ impl Ui {
     }
 
     fn mark_output_layout_dirty(&mut self) {
-        self.layout.dirty = true;
+        self.layout.invalidate_measurements();
         if let Some(auxiliary) = self.auxiliary.as_mut() {
-            auxiliary.layout.dirty = true;
+            auxiliary.layout.invalidate_measurements();
         }
     }
 
@@ -432,10 +432,10 @@ impl Ui {
         self.draw_list.invalidate_node(&self.tree, parent);
         if let Some(regions) = &mut self.layout_regions {
             regions.mark_structure(&self.tree, parent);
-            if let Some(auxiliary) = &mut self.auxiliary { auxiliary.layout.dirty = true; }
         } else {
-            self.mark_output_layout_dirty();
+            self.layout.mark_structure(parent);
         }
+        if let Some(auxiliary) = &mut self.auxiliary { auxiliary.layout.mark_structure(parent); }
     }
 
     fn mark_layout_style(&mut self, slot: u32) {
@@ -496,13 +496,8 @@ impl Ui {
         self.draw_list.invalidate_node(&self.tree, node);
         if self.layout_regions.is_none() {
             self.layout_regions = Some(alloc::boxed::Box::new(layout_regions::LayoutRegions::new()));
-            self.layout.taffy.clear();
-            self.layout.root = None;
-            self.layout.built = false;
+            self.layout.reset();
             self.layout.dirty = false;
-            self.layout.style_dirty.clear();
-            #[cfg(feature = "counters")]
-            { self.layout.counters.taffy_nodes = 0; }
         }
         self.layout_regions.as_mut().unwrap().insert(node);
         self.draw_list.set_region(node, true, self.draw_cache_budget);
@@ -601,6 +596,8 @@ impl Ui {
         }
         let mut surface_layout = layout::LayoutEngine::new();
         surface_layout.viewport = (width, height);
+        surface_layout.set_other_output_root(spec::ROOT_ID);
+        self.layout.set_other_output_root(root);
         self.auxiliary = Some(AuxiliarySurface {
             root,
             layout: surface_layout,
@@ -664,15 +661,9 @@ impl Ui {
         self.draw_list.invalidate_node(&self.tree, parent);
         let previous = self.tree.get(child).map_or(0, |node| node.parent);
         self.draw_list.invalidate_node(&self.tree, previous);
-        if let Some(regions) = &mut self.layout_regions {
-            let previous = self.tree.get(child).map_or(0, |node| node.parent);
-            if self.tree.insert_before(parent, child, anchor) {
-                regions.mark_structure(&self.tree, previous);
-                regions.mark_structure(&self.tree, parent);
-                if let Some(auxiliary) = &mut self.auxiliary { auxiliary.layout.dirty = true; }
-            }
-        } else if self.tree.insert_before(parent, child, anchor) {
-            self.mark_output_layout_dirty();
+        if self.tree.insert_before(parent, child, anchor) {
+            self.mark_layout_structure_at(previous);
+            self.mark_layout_structure_at(parent);
         }
     }
 
@@ -1779,6 +1770,18 @@ impl Ui {
         &self.draw_list
     }
 
+    /// Discard retained layout caches before the next solve. Differential
+    /// tests use this to compare incremental synchronization with a fresh tree.
+    #[cfg(feature = "counters")]
+    #[doc(hidden)]
+    pub fn force_layout_rebuild_for_validation(&mut self) {
+        self.discard_layout_regions();
+        self.layout.force_rebuild_for_validation();
+        if let Some(auxiliary) = &mut self.auxiliary {
+            auxiliary.layout.force_rebuild_for_validation();
+        }
+    }
+
     /// Work performed by the main and auxiliary outputs since the last reset.
     #[cfg(feature = "counters")]
     pub fn counters(&self) -> counters::CoreCounters {
@@ -1790,12 +1793,7 @@ impl Ui {
         if let Some(regions) = &self.layout_regions { counts.layout.add(regions.counters()); }
         if let Some(auxiliary) = &self.auxiliary {
             let layout = auxiliary.layout.counters;
-            counts.layout.structure_rebuilds = counts.layout.structure_rebuilds.saturating_add(layout.structure_rebuilds);
-            counts.layout.style_updates = counts.layout.style_updates.saturating_add(layout.style_updates);
-            counts.layout.shaping_calls = counts.layout.shaping_calls.saturating_add(layout.shaping_calls);
-            counts.layout.shaping_cache_hits = counts.layout.shaping_cache_hits.saturating_add(layout.shaping_cache_hits);
-            counts.layout.taffy_nodes_created = counts.layout.taffy_nodes_created.saturating_add(layout.taffy_nodes_created);
-            counts.layout.taffy_nodes = counts.layout.taffy_nodes.saturating_add(layout.taffy_nodes);
+            counts.layout.add(layout);
             let draw = auxiliary.draw_list.counters;
             counts.draw.builds = counts.draw.builds.saturating_add(draw.builds);
             counts.draw.ops = counts.draw.ops.saturating_add(draw.ops);
@@ -1873,7 +1871,7 @@ impl Ui {
         );
         let (mut target, mut drawn) = (target, drawn);
         if provider_stale {
-            auxiliary.layout.dirty = true;
+            auxiliary.layout.invalidate_measurements();
             layout::relayout_root(
                 &mut self.tree,
                 &self.styles,

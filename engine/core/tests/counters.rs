@@ -44,7 +44,8 @@ fn layout_and_draw_work_match_the_emitted_frame() {
     ui.draw();
     #[cfg(feature = "counters")]
     {
-        assert_eq!(ui.counters().layout.style_updates, 2);
+        // Tracking changes measurement, not the normalized flex style.
+        assert_eq!(ui.counters().layout.style_updates, 1);
         assert_eq!(ui.counters().layout.shaping_calls, 2);
     }
     ui.set_text(text, "");
@@ -52,9 +53,10 @@ fn layout_and_draw_work_match_the_emitted_frame() {
     assert_eq!(ui.draw().words, final_words);
     #[cfg(feature = "counters")]
     {
-        assert_eq!(ui.counters().layout.structure_rebuilds, 2);
+        assert_eq!(ui.counters().layout.structure_rebuilds, 1);
+        assert_eq!(ui.counters().layout.structure_syncs, 2);
         assert_eq!(ui.counters().layout.shaping_calls, 2);
-        assert_eq!(ui.counters().layout.taffy_nodes_created, 5);
+        assert_eq!(ui.counters().layout.taffy_nodes_created, 3);
         assert_eq!(ui.counters().layout.taffy_nodes, 2);
         ui.reset_counters();
         assert_eq!(ui.counters().layout.taffy_nodes, 2);

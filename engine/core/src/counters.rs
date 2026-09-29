@@ -4,7 +4,14 @@
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LayoutCounters {
+    /// Fresh Taffy trees, including the initial solve and validation resets.
     pub structure_rebuilds: u64,
+    /// Reconciliations of retained layout topology after structural changes.
+    pub structure_syncs: u64,
+    /// Calls to Taffy's root layout computation after changed inputs.
+    pub layout_passes: u64,
+    /// Leaf measurement callbacks requested by Taffy during those calls.
+    pub measure_callbacks: u64,
     /// Nodes passed to taffy's incremental set_style path.
     pub style_updates: u64,
     pub shaping_calls: u64,
@@ -64,6 +71,9 @@ impl LayoutCounters {
         self.structure_rebuilds = self
             .structure_rebuilds
             .saturating_add(other.structure_rebuilds);
+        self.structure_syncs = self.structure_syncs.saturating_add(other.structure_syncs);
+        self.layout_passes = self.layout_passes.saturating_add(other.layout_passes);
+        self.measure_callbacks = self.measure_callbacks.saturating_add(other.measure_callbacks);
         self.style_updates = self.style_updates.saturating_add(other.style_updates);
         self.shaping_calls = self.shaping_calls.saturating_add(other.shaping_calls);
         self.shaping_cache_hits = self.shaping_cache_hits.saturating_add(other.shaping_cache_hits);
