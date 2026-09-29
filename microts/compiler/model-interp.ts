@@ -23,6 +23,19 @@ export interface ModelInterpreterOptions {
   cleanup?: (interpreter: ModelInterpreter) => boolean;
 }
 type Value = any;
+function fillWindow(target: Value[], start: number, end: number, value: Value): void {
+  for (let i = Math.max(0, start); i < Math.min(end, target.length); i++) target[i] = clone(value);
+}
+/** copyRange: a window clipped to both arrays; elements equal to skip[0], if given, stay. */
+function copyWindow(target: Value[], to: number, source: Value[], from: number, count: number, skip: Value[]): void {
+  if (from < 0) { count += from; to -= from; from = 0; }
+  if (to < 0) { count += to; from -= to; to = 0; }
+  count = Math.min(count, source.length - from, target.length - to);
+  if (count <= 0) return;
+  const values = source.slice(from, from + count);
+  if (skip.length) values.forEach((value: Value, i: number) => { if (value !== skip[0]) target[to + i] = value; });
+  else target.splice(to, count, ...values);
+}
 type Env = Map<number, Value>;
 interface Cell { value: Value; version: number; changed: boolean; seen?: number[] }
 interface Region {
@@ -339,14 +352,12 @@ export class ModelInterpreter {
           case "removeAt": return Number.isInteger(a) && a >= 0 && a < target.length ? target.splice(a, 1)[0] : missing();
           case "clear": target.length = 0; return;
           case "truncate": if (a >= 0 && a < target.length) target.length = a; return;
-          case "fillRange": for (let i = Math.max(0, a); i < Math.min(b, target.length); i++) target[i] = clone(c); return;
-          case "copyRange": {
-            let count = d, from = c, to = a;
-            if (from < 0) { count += from; to -= from; from = 0; }
-            if (to < 0) { count += to; from -= to; to = 0; }
-            count = Math.min(count, b.length - from, target.length - to);
-            if (count > 0 && args.length > 4) { const values = b.slice(from, from + count); values.forEach((value: Value, i: number) => { if (value !== args[4]) target[to + i] = value; }); }
-            else if (count > 0) target.splice(to, count, ...b.slice(from, from + count));
+          case "fillRange": fillWindow(target, a, b, c); return;
+          case "copyRange": copyWindow(target, a, b, c, d, args.slice(4)); return;
+          case "fillRect": for (let r = 0; r < args[3]; r++) fillWindow(target, a + r * b, a + r * b + c, args[4]); return;
+          case "copyRect": {
+            const source = c === target ? c.slice() : c;
+            for (let r = 0; r < args[6]; r++) copyWindow(target, a + r * b, source, d + r * args[4], args[5], args.slice(7));
             return;
           }
         }

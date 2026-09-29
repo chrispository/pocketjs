@@ -62,7 +62,7 @@ export interface ModelModule {
 }
 /** One step of an assignable place below its root local or field. */
 export type ModelPathStep = { kind: "index"; index: ModelExpr } | { kind: "member"; name: string };
-export type ModelMutation = "push" | "pop" | "insert" | "removeAt" | "clear" | "truncate" | "fillRange" | "copyRange";
+export type ModelMutation = "push" | "pop" | "insert" | "removeAt" | "clear" | "truncate" | "fillRange" | "copyRange" | "fillRect" | "copyRect";
 export type ModelExpr = (
   | { kind: "literal"; value: string | number | boolean; rawNumber?: string }
   | { kind: "undefined" }

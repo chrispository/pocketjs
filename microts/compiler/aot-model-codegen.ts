@@ -142,7 +142,7 @@ class ModelRust {
         case "assign": case "mutate": {
           const t = node.target as ModelTarget; written.add(t.kind === "path" ? t.root.id : "id" in t ? t.id : t.owner);
           // A row copied from is read in place like a row read by element.
-          if (node.kind === "mutate" && node.op === "copyRange") candidate(node.args[1]);
+          if (node.kind === "mutate" && (node.op === "copyRange" || node.op === "copyRect")) candidate(node.args[node.op === "copyRect" ? 2 : 1]);
           break;
         }
         case "index": candidate(node.object); break;
@@ -199,16 +199,19 @@ class ModelRust {
     return [...prefix, ...nest(this.storage(root.id), this.rootType(root.id), 0)];
   }
   mutate(e: Extract<ModelExpr, { kind: "mutate" }>): RustExpr {
+    // copyRange and copyRect read a source array, borrowed below rather than evaluated here.
+    const sourceIndex = e.op === "copyRange" ? 1 : e.op === "copyRect" ? 2 : -1;
     const statements: RustStatement[] = [], args = e.args.map((arg, index) => {
-      if (e.op === "copyRange" && index === 1) return undefined;
+      if (index === sourceIndex) return undefined;
       const name = `arg_${this.serial++}`; statements.push(let_(name, this.expr(arg))); return rp(name);
     });
     const root = e.target.kind === "path" ? e.target.root.id : "id" in e.target ? e.target.id : e.target.owner;
     let source: RustExpr | undefined;
-    if (e.op === "copyRange") {
+    if (sourceIndex >= 0) {
       // The source is borrowed as a slice where it can be: a stored array, a row held
-      // by the enclosing loop, or an element of another stored array.
-      const value = e.args[1]!, place = this.borrow(value);
+      // by the enclosing loop, or an element of another stored array. A source that
+      // may be the target is copied first, except for copyRange's copy_within.
+      const value = e.args[sourceIndex]!, place = this.borrow(value);
       const element = value.type.kind === "array" ? value.type.element : value.type;
       const slice = (borrowed: RustExpr) => { const name = `source_${this.serial++}`; statements.push(let_(name, borrowed, false, rr({ kind: "slice", element: this.type(element) }))); return rp(name); };
       const sameRoot = (value.kind === "local" || value.kind === "field") && value.id === root;
@@ -217,10 +220,11 @@ class ModelRust {
       const other = (stored.kind === "local" || stored.kind === "field" || stored.kind === "signal") && stored.id !== root;
       const row = value.kind === "index" && other ? this.rows.get(this.rowKey(value.object, value.index)) : undefined;
       const chain = !place && !row && other ? this.readChain(value) : undefined;
+      const within = e.op === "copyRange" && e.args.length < 5 && sameRoot && (e.target.kind === "local" || e.target.kind === "field");
       if (row) source = rp(row);
       else if (place && !sameRoot) source = slice(ref(place));
       else if (chain) { statements.push(...chain.statements); source = slice({ kind: "match", value: chain.value, arms: [{ pattern: { kind: "variant", path: ["Some"], tuple: [rn("value")] }, body: rp("value") }, { pattern: { kind: "wildcard" }, body: ref({ kind: "array", elements: [] }) }] }); }
-      else if (e.args.length > 4 || !(sameRoot && (e.target.kind === "local" || e.target.kind === "field"))) { const name = `source_${this.serial++}`; statements.push(let_(name, this.expr(value))); source = slice(ref(rp(name))); }
+      else if (!within) { const name = `source_${this.serial++}`; statements.push(let_(name, this.expr(value))); source = slice(ref(rp(name))); }
     }
     const result = `result_${this.serial++}`, returns = e.type.kind !== "void";
     if (returns) statements.push(let_(result, this.defaultValue(e.type), true, this.type(e.type)));
@@ -239,6 +243,8 @@ class ModelRust {
         case "copyRange":
           if (!source) return [re(builtin("copy_within", ref(place, true), args[2]!, args[0]!, args[3]!))];
           return this.copyWindow(place, element, source, args[0]!, args[2]!, args[3]!, args[4]);
+        case "fillRect": return this.fillRect(place, element, args[0]!, args[1]!, args[2]!, args[3]!, args[4]!);
+        case "copyRect": return this.copyRect(place, element, source!, args[0]!, args[1]!, args[3]!, args[4]!, args[5]!, args[6]!, args[7]);
       }
     }));
     return block(statements, returns ? rp(result) : undefined);
@@ -252,9 +258,7 @@ class ModelRust {
   copyWindow(place: RustExpr, element: AotType, source: RustExpr, to: RustExpr, from: RustExpr, count: RustExpr, skip?: RustExpr): RustStatement[] {
     const id = this.serial++, name = (base: string) => `${base}_${id}`;
     const i32 = (value: RustExpr) => cast(value, rt("i32")), usize = (value: RustExpr) => cast(value, rt("usize"));
-    const at = rp(name("to")), start = rp(name("from")), length = rp(name("count")), target = rp(name("target")), index = rp(name("index")), value = rp(name("value"));
-    const store = assign({ kind: "index", object: rp(name("window")), index }, value);
-    const window = (slice: RustExpr, first: RustExpr, mutable: boolean) => ref({ kind: "index", object: slice, index: { kind: "struct", path: ["core", "ops", "Range"], fields: [{ name: "start", value: usize(first) }, { name: "end", value: bin("+", usize(first), usize(length)) }] } }, mutable);
+    const at = rp(name("to")), start = rp(name("from")), length = rp(name("count")), target = rp(name("target"));
     const limit = (slice: RustExpr, offset: RustExpr) => condition(bin(">", length, bin("-", i32(rm(slice, "len")), offset)), [assign(length, bin("-", i32(rm(slice, "len")), offset))]);
     // Saturating steps keep i32 arithmetic: a window pushed past i32 range is empty either way.
     return [
@@ -263,14 +267,21 @@ class ModelRust {
       condition(bin("<", at, rl(0)), [assign(length, rm(length, "saturating_add", at)), assign(start, rm(start, "saturating_sub", at)), assign(at, rl(0))]),
       let_(name("target"), ref(place, true), false, rr({ kind: "slice", element: this.type(element) }, true)),
       limit(source, start), limit(target, at),
-      condition(bin(">", length, rl(0)), [
-        let_(name("window"), window(target, at, true)), let_(name("values"), window(source, start, false)), let_(name("index"), rl(0, "usize"), true),
-        ...this.shortLoop(skip ? undefined : bin(">=", length, rl(SHORT_WINDOW)), [re(rm(rp(name("window")), "copy_from_slice", rp(name("values"))))], { kind: "while", condition: bin("<", index, usize(length)), body: rb([
-          let_(name("value"), { kind: "index", object: rp(name("values")), index }),
-          skip ? condition(bin("!=", value, skip), [store]) : store,
-          assign(index, bin("+", index, rl(1))),
-        ]) }),
-      ]),
+      condition(bin(">", length, rl(0)), this.copyLoop(name, target, usize(at), source, usize(start), usize(length), skip)),
+    ];
+  }
+  /** Copies `length` elements from source[from..] to target[to..], both in range, skipping `skip`. */
+  copyLoop(name: (base: string) => string, target: RustExpr, to: RustExpr, source: RustExpr, from: RustExpr, length: RustExpr, skip?: RustExpr): RustStatement[] {
+    const index = rp(name("index")), value = rp(name("value")), window = rp(name("window")), values = rp(name("values"));
+    const range = (first: RustExpr): RustExpr => ({ kind: "struct", path: ["core", "ops", "Range"], fields: [{ name: "start", value: first }, { name: "end", value: bin("+", first, length) }] });
+    const store = assign({ kind: "index", object: window, index }, value);
+    return [
+      let_(name("window"), ref({ kind: "index", object: target, index: range(to) }, true)), let_(name("values"), ref({ kind: "index", object: source, index: range(from) })), let_(name("index"), rl(0, "usize"), true),
+      ...this.shortLoop(skip ? undefined : bin(">=", length, rl(SHORT_WINDOW)), [re(rm(window, "copy_from_slice", values))], { kind: "while", condition: bin("<", index, length), body: rb([
+        let_(name("value"), { kind: "index", object: values, index }),
+        skip ? condition(bin("!=", value, skip), [store]) : store,
+        assign(index, bin("+", index, rl(1))),
+      ]) }),
     ];
   }
   /** A loop over a short window, or `long` (memcpy or memset) when `isLong` holds. */
@@ -280,19 +291,69 @@ class ModelRust {
   /** fillRange written out in place, like copyWindow. */
   fillWindow(place: RustExpr, element: AotType, start: RustExpr, end: RustExpr, value: RustExpr): RustStatement[] {
     const id = this.serial++, name = (base: string) => `${base}_${id}`;
-    const first = rp(name("start")), last = rp(name("end")), target = rp(name("target")), index = rp(name("index"));
-    const size = cast(rm(target, "len"), rt("i32"));
+    const first = rp(name("start")), last = rp(name("end")), target = rp(name("target"));
+    const size = cast(rm(target, "len"), rt("i32")), usize = (value: RustExpr) => cast(value, rt("usize"));
     return [
       let_(name("target"), ref(place, true), false, rr({ kind: "slice", element: this.type(element) }, true)),
       let_(name("start"), start, true), let_(name("end"), end, true),
       condition(bin("<", first, rl(0)), [assign(first, rl(0))]),
       condition(bin(">", last, size), [assign(last, size)]),
-      condition(bin("<", first, last), [
-        let_(name("window"), ref({ kind: "index", object: target, index: { kind: "struct", path: ["core", "ops", "Range"], fields: [{ name: "start", value: cast(first, rt("usize")) }, { name: "end", value: cast(last, rt("usize")) }] } }, true)),
-        let_(name("index"), rl(0, "usize"), true),
-        ...this.shortLoop(bin(">=", bin("-", last, first), rl(SHORT_WINDOW)), [re(rm(rp(name("window")), "fill", this.copy(element) ? value : rm(value, "clone")))],
-          { kind: "while", condition: bin("<", index, rm(rp(name("window")), "len")), body: rb([assign({ kind: "index", object: rp(name("window")), index }, this.copy(element) ? value : rm(value, "clone")), assign(index, bin("+", index, rl(1)))]) }),
-      ]),
+      condition(bin("<", first, last), this.fillLoop(name, target, usize(first), usize(bin("-", last, first)), element, value)),
+    ];
+  }
+  /** Fills `length` elements of target from `at`, all in range. */
+  fillLoop(name: (base: string) => string, target: RustExpr, at: RustExpr, length: RustExpr, element: AotType, value: RustExpr): RustStatement[] {
+    const index = rp(name("index")), window = rp(name("window")), item = this.copy(element) ? value : rm(value, "clone");
+    return [
+      let_(name("window"), ref({ kind: "index", object: target, index: { kind: "struct", path: ["core", "ops", "Range"], fields: [{ name: "start", value: at }, { name: "end", value: bin("+", at, length) }] } }, true)),
+      let_(name("index"), rl(0, "usize"), true),
+      ...this.shortLoop(bin(">=", length, rl(SHORT_WINDOW)), [re(rm(window, "fill", item))],
+        { kind: "while", condition: bin("<", index, length), body: rb([assign({ kind: "index", object: window, index }, item), assign(index, bin("+", index, rl(1)))]) }),
+    ];
+  }
+  /**
+   * Rows of a rectangle whose every row lies in range (`inside`) run from offsets
+   * that advance by their strides without clipping. Other rectangles, rarely drawn,
+   * go to `otherwise`, a builtin that clips each row as copyRange or fillRange would.
+   */
+  rectRows(name: (base: string) => string, height: RustExpr, inside: RustExpr, offsets: { start: RustExpr; stride: RustExpr }[], row: (offsets: RustExpr[]) => RustStatement[], otherwise: RustExpr): RustStatement[] {
+    const line = rp(name("line")), offset = (index: number) => rp(name(`offset${index}`));
+    return [condition(inside, [
+      let_(name("line"), rl(0, "i32"), true),
+      ...offsets.map((o, index) => let_(name(`offset${index}`), cast(o.start, rt("usize")), true)),
+      { kind: "while", condition: bin("<", line, height), body: rb([
+        ...row(offsets.map((_, index) => offset(index))),
+        ...offsets.map((o, index) => assign(offset(index), bin("+", offset(index), cast(o.stride, rt("usize"))))),
+        assign(line, bin("+", line, rl(1))),
+      ]) },
+    ], rb([re(otherwise)]))];
+  }
+  /** Whether a `width` x `height` rectangle at `start` with a non-negative `stride` lies within the slice `within`. */
+  rectInside(start: RustExpr, stride: RustExpr, width: RustExpr, height: RustExpr, within: RustExpr): RustExpr {
+    const i64 = (value: RustExpr) => cast(value, rt("i64"));
+    const end = bin("+", bin("+", i64(start), bin("*", i64(bin("-", height, rl(1))), i64(stride))), i64(width));
+    return bin("&&", bin("&&", bin(">=", start, rl(0)), bin(">=", stride, rl(0))), bin(">=", i64(rm(within, "len")), end));
+  }
+  /** copyRect: copyRange for each row, read from a source that is not the target. */
+  copyRect(place: RustExpr, element: AotType, source: RustExpr, to: RustExpr, toStride: RustExpr, from: RustExpr, fromStride: RustExpr, width: RustExpr, height: RustExpr, skip?: RustExpr): RustStatement[] {
+    const id = this.serial++, name = (base: string) => `${base}_${id}`, target = rp(name("target"));
+    const inside = bin("&&", bin("&&", bin("&&", bin(">", width, rl(0)), bin(">", height, rl(0))), this.rectInside(to, toStride, width, height, target)), this.rectInside(from, fromStride, width, height, source));
+    return [
+      let_(name("target"), ref(place, true), false, rr({ kind: "slice", element: this.type(element) }, true)),
+      ...this.rectRows(name, height, inside, [{ start: to, stride: toStride }, { start: from, stride: fromStride }],
+        ([at, start]) => [re(block(this.copyLoop(name, target, at!, source, start!, cast(width, rt("usize")), skip)))],
+        rc(rp("microts", "builtins", "copy_rect"), target, to, toStride, source, from, fromStride, width, height, skip ? rc(rp("Some"), skip) : rp("None"))),
+    ];
+  }
+  /** fillRect: fillRange for each row. */
+  fillRect(place: RustExpr, element: AotType, start: RustExpr, stride: RustExpr, width: RustExpr, height: RustExpr, value: RustExpr): RustStatement[] {
+    const id = this.serial++, name = (base: string) => `${base}_${id}`, target = rp(name("target"));
+    const inside = bin("&&", bin("&&", bin(">", width, rl(0)), bin(">", height, rl(0))), this.rectInside(start, stride, width, height, target));
+    return [
+      let_(name("target"), ref(place, true), false, rr({ kind: "slice", element: this.type(element) }, true)),
+      ...this.rectRows(name, height, inside, [{ start, stride }],
+        ([at]) => [re(block(this.fillLoop(name, target, at!, cast(width, rt("usize")), element, value)))],
+        rc(rp("microts", "builtins", "fill_rect"), target, start, stride, width, height, this.copy(element) ? value : rm(value, "clone"))),
     ];
   }
   copy(type: AotType): boolean {

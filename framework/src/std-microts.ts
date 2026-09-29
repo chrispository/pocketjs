@@ -149,6 +149,18 @@ export function copyRange<T>(target: T[], targetStart: i32, source: readonly T[]
   if (skip.length) values.forEach((value, i) => { if (value !== skip[0]) target[to + i] = value; });
   else target.splice(to, n, ...values);
 }
+/** Row r of the rectangle is fillRange(target, start + r * stride, start + r * stride + width, value). */
+export function fillRect<T>(target: T[], start: i32, stride: i32, width: i32, height: i32, value: T): void {
+  for (let r = 0; r < height; r++) fillRange(target, start + r * stride, start + r * stride + width, value);
+}
+/**
+ * Row r of the rectangle is copyRange(target, targetStart + r * targetStride, source,
+ * sourceStart + r * sourceStride, width, ...skip); every row is read before any is written.
+ */
+export function copyRect<T>(target: T[], targetStart: i32, targetStride: i32, source: readonly T[], sourceStart: i32, sourceStride: i32, width: i32, height: i32, ...skip: [T?]): void {
+  const from = source === target ? source.slice() : source;
+  for (let r = 0; r < height; r++) copyRange(target, targetStart + r * targetStride, from, sourceStart + r * sourceStride, width, ...skip);
+}
 export function codePoints(value: string): i32[] { return Array.from(value, c => c.codePointAt(0)!); }
 export function fromCodePoint(code: i32): string { return code >= 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff) ? String.fromCodePoint(code) : "\ufffd"; }
 /** Guest builds replace calls with the file contents at compile time. */

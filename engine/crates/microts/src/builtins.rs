@@ -252,6 +252,32 @@ pub fn copy_range<T: Copy, S: AsRef<[T]> + ?Sized>(target: &mut [T], target_star
         target[to..to + count].copy_from_slice(&source[from..from + count]);
     }
 }
+/// A row offset of copy_rect or fill_rect; one outside i32 clips to an empty window either way.
+fn row_start(start: i32, row: i32, stride: i32) -> i32 {
+    (start as i64 + row as i64 * stride as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+/// copyRect: row r is copy_range from source_start + r * source_stride to
+/// target_start + r * target_stride, leaving target elements where the source holds `skip`.
+pub fn copy_rect<T: Copy + PartialEq>(target: &mut [T], target_start: i32, target_stride: i32, source: &[T], source_start: i32, source_stride: i32, width: i32, height: i32, skip: Option<T>) {
+    for row in 0..height.max(0) {
+        let (to, from) = (row_start(target_start, row, target_stride), row_start(source_start, row, source_stride));
+        if let Some((to, from, count)) = copy_window(target.len(), to, source.len(), from, width) {
+            let (window, values) = (&mut target[to..to + count], &source[from..from + count]);
+            match skip {
+                None => window.copy_from_slice(values),
+                Some(skip) => window.iter_mut().zip(values).filter(|(_, value)| **value != skip).for_each(|(slot, value)| *slot = *value),
+            }
+        }
+    }
+}
+/// fillRect: row r is fill_range from start + r * stride over `width` elements.
+pub fn fill_rect<T: Clone>(target: &mut [T], start: i32, stride: i32, width: i32, height: i32, value: T) {
+    for row in 0..height.max(0) {
+        let first = row_start(start, row, stride);
+        let end = if width <= 0 { first } else { (first as i64 + width as i64).min(i32::MAX as i64) as i32 };
+        fill_range(target, first, end, value.clone());
+    }
+}
 pub fn copy_within<T: Copy>(target: &mut [T], source_start: i32, target_start: i32, count: i32) {
     if let Some((to, from, count)) = copy_window(target.len(), target_start, target.len(), source_start, count) {
         target.copy_within(from..from + count, to);

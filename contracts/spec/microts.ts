@@ -73,7 +73,7 @@ export type MicroTsBuiltin = keyof typeof MICROTS_BUILTINS;
  */
 export const MICROTS_MATH_BUILTINS = ["sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "exp", "log"] as const;
 export const MICROTS_MATH2_BUILTINS = ["atan2", "pow", "hypot"] as const;
-export const MICROTS_MUTATION_BUILTINS = ["push", "pop", "insert", "removeAt", "clear", "truncate", "fillRange", "copyRange"] as const;
+export const MICROTS_MUTATION_BUILTINS = ["push", "pop", "insert", "removeAt", "clear", "truncate", "fillRange", "copyRange", "fillRect", "copyRect"] as const;
 export const MICROTS_EXTENDED_BUILTINS: Record<string, string> = {
   ...Object.fromEntries(MICROTS_NUMERIC_TYPES.map(name => [name, `export declare function ${name}(value: number): N.${name};`])),
   ...Object.fromEntries(MICROTS_MATH_BUILTINS.map(name => [name, `export declare function ${name}<T extends N.f32 | N.f64>(value: T): T;`])),
@@ -87,6 +87,8 @@ export const MICROTS_EXTENDED_BUILTINS: Record<string, string> = {
   truncate: "export declare function truncate<T>(target: T[], length: N.i32): void;",
   fillRange: "export declare function fillRange<T>(target: T[], start: N.i32, end: N.i32, value: T): void;",
   copyRange: "export declare function copyRange<T>(target: T[], targetStart: N.i32, source: readonly T[], sourceStart: N.i32, count: N.i32, skip?: T): void;",
+  fillRect: "export declare function fillRect<T>(target: T[], start: N.i32, stride: N.i32, width: N.i32, height: N.i32, value: T): void;",
+  copyRect: "export declare function copyRect<T>(target: T[], targetStart: N.i32, targetStride: N.i32, source: readonly T[], sourceStart: N.i32, sourceStride: N.i32, width: N.i32, height: N.i32, skip?: T): void;",
   codePoints: "export declare function codePoints(value: string): N.i32[];",
   fromCodePoint: "export declare function fromCodePoint(code: N.i32): string;",
   embedBytes: "export declare function embedBytes(path: string): N.u8[];",
