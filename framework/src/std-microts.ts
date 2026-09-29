@@ -87,7 +87,7 @@ export function __colorText(value: Color | undefined, missing = ""): string {
   return "#" + [bits & 255, (bits >>> 8) & 255, (bits >>> 16) & 255, bits >>> 24].map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-// Native game subset. Conversions are named after their target type and use
+// Numeric conversions are named after their target type and use
 // Rust `as` semantics: floats truncate toward zero and saturate, integers wrap.
 // usize converts as u32 on every target. Called directly, a conversion treats
 // a value with a fraction as a float; compiled models pass the static type.

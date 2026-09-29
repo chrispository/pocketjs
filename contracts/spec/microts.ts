@@ -67,7 +67,7 @@ export const MICROTS_BUILTINS = {
 export type MicroTsBuiltin = keyof typeof MICROTS_BUILTINS;
 
 /**
- * Built-ins of the native game subset: numeric conversions named after their
+ * Built-ins for imperative model code: numeric conversions named after their
  * target type, float math, in-place array operations whose first argument is
  * an assignable place, code points and embedded binary constants.
  */

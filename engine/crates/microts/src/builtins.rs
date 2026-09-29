@@ -155,7 +155,7 @@ pub fn fixed<T: Float>(value: T, digits: i32) -> String {
         .to_string()
 }
 
-// Native game subset: float math, in-place array operations and code points.
+// Float math, in-place array operations and code points.
 // Array operations clamp their ranges; an out-of-range element is left alone,
 // matching element writes.
 

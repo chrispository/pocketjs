@@ -244,7 +244,7 @@ registration forms; arbitrary startup calls belong in model methods/hooks.
 Every reachable module's top level is checked, including a module imported
 for one constant. A pure helper takes its data through parameters. Another
 model's signals are reached through props, events or context, not by importing
-them into a model module. [State modules](#native-game-subset) share
+them into a model module. [State modules](#imperative-code) share
 top-level `let` fields with the modules that import them.
 
 ## Functions and callbacks
@@ -253,7 +253,7 @@ top-level `let` fields with the modules that import them.
 Each parameter has a simple name and an explicit supported type. Parameter
 destructuring, optional and rest parameters, function type parameters and
 generators are not supported; a trailing parameter may default to a literal or
-constant (see the [native game subset](#native-game-subset)). Return types are
+constant (see [Imperative code](#imperative-code)). Return types are
 inferred from the body's return statements, including those in loops and
 `switch` cases; a function that returns a value returns one on every path,
 unless its return type includes `undefined`, which it returns at its end.
@@ -310,9 +310,9 @@ export function increment(): void {
 
 `for-in`, `for await`, labels, `try`/`catch`/`finally`, `throw` and arbitrary
 statement forms are unsupported. Synchronous functions also admit `while`,
-`do`, `break`, `continue` and other `for` loops; see the
-[native game subset](#native-game-subset). Switch cases cannot fall through; current lowering does
-not enforce enum exhaustiveness or duplicate-case diagnostics.
+`do`, `break`, `continue` and other `for` loops; see
+[Imperative code](#imperative-code). Switch cases cannot fall through; current
+lowering does not enforce enum exhaustiveness or duplicate-case diagnostics.
 
 ```ts
 import { createSignal } from "solid-js";
@@ -390,11 +390,12 @@ a TypeScript declaration for another SDK is not enough to admit a service.
 A native host must provide its transport and typed deliveries. See
 [the host boundary](/docs/microts-boundaries/#a-task-requests-work-the-host-performs-it).
 
-## Native game subset
+## Imperative code
 
-Compiled models also admit the forms below. They target native AOT hosts that
-drive a model once per frame, such as a game loop; guest builds lower the same
-Model IR to JavaScript, and the reference interpreter executes it.
+Compiled models also admit the imperative forms below: state shared between
+modules, loops, in-place array operations, numeric conversions and float math.
+Native AOT hosts compile them to Rust; guest builds lower the same Model IR to
+JavaScript, and the reference interpreter executes it.
 
 | Form | Rule |
 |---|---|
