@@ -1,25 +1,27 @@
 # MicroTS
 
-MicroTS compiles Vue single-file components or Solid TSX views into Rust.
+MicroTS compiles Solid TSX views or Vue single-file components into Rust.
 State and actions come from a handwritten Rust model or a TypeScript model
 compiled into Rust. **The native AOT application executes its view and model
 without a JavaScript engine.**
 
-The Vue frontend uses Vue Vapor, Vue's upstream compilation mode. PocketJS
-exposes its Vue adapters through `@pocketjs/framework/vue-vapor/*`.
+Both frontends produce the same typed View IR and use the same Rust generator
+and runtime. The Vue frontend uses Vue Vapor, Vue's upstream compilation mode.
+PocketJS exposes its Vue adapters through `@pocketjs/framework/vue-vapor/*`.
 
 **The application source-language contract is TypeScript.** Vue scripts use
 `lang="ts"`, Solid views use `.tsx`, and model modules use `.ts`. Browser and
 QuickJS builds execute JavaScript emitted from that source. The emitted
 language does not extend AOT admission to arbitrary JavaScript source.
 
-This guide uses a PocketJS source checkout. It takes you through an existing
-example, a counter you can build, and a browser preview of its Vue
-implementation.
+This guide describes the source, compiler, model and native host, then shows
+how to build an application and how updates reach the screen. Commands use a
+PocketJS source checkout. The counter tutorial uses Vue with a handwritten
+Rust model; the Solid example compiles its TypeScript model.
 
 | What you want to do | Where to start |
 |---|---|
-| Understand how a Vue template becomes native code | [How Vue becomes Rust](#how-vue-becomes-rust) |
+| Understand how views and models become native code | [Compilation and runtime](#compilation-and-runtime) |
 | Compare ordinary TypeScript apps, AOT views and compiled models | [TypeScript support](/docs/typescript-support/) |
 | Compile TypeScript state, reactions and tasks | [TypeScript models to Rust](/docs/microts-model/) |
 | Understand which code runs in TypeScript builds, Rust and the host | [TypeScript and native boundaries](/docs/microts-boundaries/) |
@@ -27,8 +29,12 @@ implementation.
 | Build an example or create an application | [Build the supplied example](#1-build-the-supplied-example) |
 | Pass props, add instance state, or use slots and context | [Components and state](/docs/microts-components/) |
 | Look up template syntax, input or compiler flags | [API and commands](/docs/microts-reference/) |
+| Understand binding updates, layout and drawing | [Native updates and rendering](#native-updates-and-rendering) |
+| Inspect optimization decisions or compare builds | [Measure native work](#measure-native-work) |
 
-## How Vue becomes Rust
+<a id="how-vue-becomes-rust"></a>
+
+## Compilation and runtime
 
 The `app.model` setting in `pocket.json` chooses the model implementation.
 The default `"rust"` mode uses a handwritten Rust model. With `app.aot: true`,
@@ -43,28 +49,46 @@ defines the view and model subsets; the [model guide](/docs/microts-model/)
 describes state, reactions and tasks. The counter below demonstrates the
 default Rust mode.
 
-A template describes nodes, the values they display, and the actions that
-change them. The compiler turns those declarations into Rust operations on
-the UI tree:
+A view describes nodes, the values they display, and the actions that change
+them. The compiler checks source types and admitted expressions, then emits
+Rust operations on the UI tree. Compiled models also provide state, reactions
+and task bodies:
 
 ```text
-Counter.vue + types exported by Counter.ts
-                 │  MicroTS compiler
-                 ▼
-gen/counter.rs + gen/styles.bin
-                 │  Cargo, with your Rust model and microts
-                 ▼
-         Native application
+App.tsx or App.vue + App.ts types  → View IR  → Rust view and styles
+App.ts bodies (compiled mode)    → Model IR → Rust model
+
+Cargo: generated view + selected model + microts + Rust UI core + host
+                                      ↓
+                               Native application
 ```
 
-At build time, Vue's template parser and Vapor transforms identify the
-elements, bindings, conditions and loops. The TypeScript checker supplies
-their types: `ref<i32>(0)` exposes an `i32` value named `count`. The compiler
-checks the supported syntax and records a typed description of the view.
-It converts that description into a Rust syntax tree and prints Rust source.
-Cargo compiles the generated source together with the selected model and the
-runtime. In compiled mode, a separate Model IR records state and function
-bodies; its Rust output implements the same view-model trait.
+The Solid frontend reads JSX and the supported component forms. The Vue
+frontend uses the template parser and Vapor transforms to identify elements,
+bindings, conditions and loops. The TypeScript checker supplies their types:
+for example, `ref<i32>(0)` exposes an `i32` value named `count`.
+
+The compiler emits Rust source and a binary style table. Cargo compiles the
+Rust with the selected model and runtime. Model IR records state, function
+bodies, dependencies and task continuations; the generated model implements
+the same view-model trait that a handwritten model implements.
+
+| Part | Owns |
+|---|---|
+| View | Nodes, props, slots, bindings, event handlers and mounted component instances |
+| Model | State, derived values, reactions, methods and tasks |
+| Rust UI core | The UI tree, layout, text measurement, animation and draw list |
+| Native host | Input samples, font and image assets, service execution and presentation |
+
+Components can own instance state through model factories. Keyed lists keep
+an instance while its key remains mounted; removing it runs cleanup and
+cancels its tasks. Props, events and context carry values between components.
+See [Components and state](/docs/microts-components/) for those contracts.
+
+Compiled `async` functions become resumable model tasks. They emit typed
+commands for the host and resume from a frame's readiness snapshot; they do
+not require a Rust async executor. [TypeScript models to Rust](/docs/microts-model/)
+describes state ownership, reactions and cancellation.
 
 ### Follow one binding
 
@@ -104,15 +128,23 @@ The view compiler does not need the model's function bodies to emit the call.
 
 ### What happens after a press
 
-**The native view stores node IDs and previous binding values.** It runs
-without Vue refs, effects or a JavaScript render function. When the host
-calls `frame(input)`, generated Rust dispatches input to the model, then
-updates the view if a handler ran or the app was invalidated. In the default
-Rust mode, the first frame performs the initial binding updates. Compiled mode
-finishes initial reactions and mount hooks during construction, before the
-first input dispatch. In this counter, changing `count` from `0` to
-`1` changes the existing text node to `Count: 1`; the button stays mounted.
-The Rust core handles layout and produces the draw list for the host.
+**The native view stores node IDs and previous binding values.** The generated
+Rust implements the admitted reactive behavior without a JavaScript engine.
+When the host calls `frame(input)`, the Rust model path dispatches input and
+updates the view when a handler ran or the app was invalidated.
+
+The compiled model path also freezes readiness and resumes waiting tasks
+before input dispatch. Reactions and memos settle before view updates;
+lifecycle hooks can cause further update rounds. The application drains host
+commands and ticks the core. The host then requests the draw list and presents
+it. Task deliveries can trigger updates without a button press.
+
+In the default Rust mode, the first frame performs the initial binding
+updates. Compiled mode finishes initial reactions and mount hooks during
+construction, before the first input dispatch. In this counter, changing
+`count` from `0` to `1` changes the existing text node to `Count: 1`; the button
+stays mounted. Updating a binding, computing layout and repainting pixels are
+separate operations, described under [Native updates and rendering](#native-updates-and-rendering).
 
 Generated files contain the node and block code for mounting, updating,
 input dispatch and unmounting, including child components. **You maintain
@@ -121,16 +153,33 @@ maintains `gen/`.**
 
 ## 1. Build the supplied example
 
-Install Bun and a Rust toolchain with Cargo. Run these commands from the
-repository root:
+Install Bun and a Rust toolchain with Cargo, then run `bun install` from the
+repository root. Choose an example based on the frontend and model you want:
+
+| Example | View | Native model |
+|---|---|---|
+| `solid-aot-lab` | Solid TSX | Compiled from TypeScript |
+| `vue-sfc-lab` | Vue SFC | Handwritten Rust |
+
+Build the Solid example:
 
 ```sh
-bun install
+bun microts/compiler/cli.ts build solid-aot-lab --strict
+cargo check --manifest-path apps/solid-aot-lab/Cargo.toml
+```
+
+Its `app.ts` supplies state and methods, and `src/lib.rs` connects the generated
+model and view to the host. Follow the [Solid guide](/docs/microts-solid/) for
+TSX authoring, imports and a browser build.
+
+Build the Vue example:
+
+```sh
 bun microts/compiler/cli.ts build vue-sfc-lab --strict
 cargo check --manifest-path apps/vue-sfc-lab/Cargo.toml
 ```
 
-The first build reads the lab's Vue components and TypeScript declarations,
+The Vue build reads the lab's components and TypeScript declarations,
 then writes `apps/vue-sfc-lab/gen/`. Cargo compiles that output together with
 the application's Rust implementation.
 
@@ -338,8 +387,12 @@ Cargo again. Changes confined to `src/main.rs` need a Cargo build.
 The host owns input sampling, fonts, image resources and presentation.
 To embed the generated application:
 
-1. Create a `Ui`, set its viewport, load `gen/styles.bin`, and load the font
-   atlases and image resources your screen uses.
+1. Create a `Ui` and set its viewport. When configuring environment-dependent
+   optimizations, call generated `prepare_specialization(&mut ui)` before
+   loading styles and fonts, as described in the
+   [native build options](/docs/microts-reference/#native-build-options).
+   Load `gen/styles.bin` and the font atlases and image resources your screen
+   uses. The counter above runs with the general layout and drawing paths.
 2. Construct `CounterApp` with that UI, its root props and your model.
 3. Call `app.frame(&input)` once per tick with a hardware-neutral `Input`.
    The generated frame handles input, updates bindings and ticks the core.
@@ -366,6 +419,132 @@ for its target. `--board` checks an input profile; it does not build or flash
 firmware. Runtime storage uses `alloc`. The earlier
 [C cartridge compiler](https://github.com/pocket-stack/pocket-vapor) has its
 own repository and workflow for GB, NES and GBA.
+
+## Native updates and rendering
+
+**Native builds enable specialization by default.** The compiler uses facts
+about constants and model dependencies to remove repeated binding work. Some
+layout and drawing optimizations also require the host's asset bytes and
+environment. Use `build --specialize off` for a comparison build. Both modes
+use the same View IR, Model IR, admission rules and shared UI core.
+
+### Binding evaluation
+
+The compiler folds supported scalar expressions using MicroTS integer widths
+and `f32` rounding. It does not execute model functions or external calls
+during compilation. Unsupported folds keep their runtime evaluation.
+
+Source class and text literals are written during mount. Folding a dynamic
+property, class or nonempty text expression preserves its first-update write;
+a constant-selected branch also mounts at its first update. Generated blocks
+whose bindings need no further evaluation can skip later binding updates.
+Refs, dispatch, placement, unmount and cleanup keep their lifecycle behavior.
+
+For compiled models, generated guards compare recorded signal and memo read
+dependencies with the changes accumulated during the frame. Lifecycle rounds
+add to the same change snapshot. A guard can skip a binding when none of its
+dependencies changed. Unknown dependencies, handwritten models, props
+replacement, explicit invalidation and task recovery can require full updates.
+Input dispatch can also force an update. **Dependency analysis does not
+guarantee that every input evaluates only the bindings that changed.**
+
+The [specialization report](/docs/microts-reference/#specialization-report)
+explains `Build`, `Mount` and `Frame` classifications and why a binding or
+layout region cannot use an optimization.
+
+### Incremental layout
+
+**The shared core synchronizes changes into its existing Taffy layout tree.**
+This applies to primary and auxiliary outputs, including builds with
+specialization disabled. Existing nodes keep generation-checked layout
+handles. Insertion creates the required layout nodes; removal and reordering
+change child lists. Destroyed nodes release their handles and measurement
+contexts before a reused UI slot can supply a different node.
+
+A Text element owns one measured leaf for its concatenated inline run; an
+empty run has no layout leaf. Moving inline text updates both measurement
+owners. Each output has its own handle map, so moving between outputs cannot
+reuse a handle from the other layout tree.
+
+Resolved layout styles, child lists, measurement inputs and viewport
+constraints determine layout work. Text, font slot, tracking, line height and
+provider changes invalidate measurements. Font replacement invalidates cached
+results; reuse preserves missing-glyph accounting. Taffy propagates changed
+constraints through auto sizing and flex layout and reuses results whose
+inputs still match. A paint change with equal layout inputs skips the solver.
+
+Replacing an Image branch therefore does not require rebuilding every layout
+node. Whether neighboring geometry changes depends on sizing and flex
+constraints. A layout update also does not imply full-screen repainting.
+Structural projection, rounding and result readback still visit the tree,
+so total layout work is not guaranteed to be proportional to the changed nodes.
+
+### Layout regions and baked results
+
+The compiler can identify fixed-size subtrees that qualify for independent
+layout. **Each activated region has a separate solver**, with its root exposed
+as a leaf in the parent solver. These regions are optional; ordinary
+incremental layout does not require them or any component-specific registration.
+Structural changes inside a region rebuild that region's solver.
+
+Activation requires matching viewport, tick rate, style bytes, font atlas bytes
+and text provider. A mismatch disables the application's environment-dependent
+optimizations and uses runtime layout and painting. Constant folding and
+binding guards remain applicable. The
+[native build options](/docs/microts-reference/#native-build-options) describe
+the root eligibility rules, host preparation and diagnostics.
+
+Supported target configurations can bake first-solve geometry, text sizes and
+static draw tables. Runtime checks cover the target, tree shape, dimensions
+and placement before reuse; later geometry changes use the solver. Other
+targets use live layout. Baking does not change the application's mount or
+update semantics.
+
+### Drawing and damage
+
+Region draw caches reuse generated words when node content, placement,
+clipping, transforms and resource revisions match. Supported static draw
+tables can supply those words from generated Rust data. Textures and other
+unsupported static operations use runtime painting. Cache budgets and the
+exact reuse conditions are listed in the
+[reference](/docs/microts-reference/#draw-cache-and-damage-rules).
+
+Draw segments let each damage tracker compare regions against its last
+committed frame. Unchanged segments need no instruction decoding; changed
+segments compare their own slices, and moved segments damage both old and new
+bounds. Without segment metadata, the tracker compares ordinary DrawLists.
+
+**The host owns damaged-pixel submission.** It clears each damage rectangle
+and replays the complete DrawList clipped to that rectangle. Cached draw words
+and skipped layout work reduce CPU computation; partial presentation also
+requires the host to consume the damage plan.
+
+## Measure native work
+
+Use the report to inspect the compiler's decisions and the native differential
+harness to compare the same app with specialization off and on:
+
+```sh
+bun microts/compiler/cli.ts check sensor-list --report specialization
+bun microts/compiler/specialization-harness.ts sensor-list --release
+```
+
+`sensor-list` displays simulated sensor values and needs no sensor hardware.
+Its input tape exercises value changes, conditional content, keyed-list
+changes, focus, scrolling and viewport changes. The harness compares draw
+words, pixels, tree identity, input targets, commands and lifecycle behavior.
+See [Compare native builds](/docs/microts-reference/#compare-native-builds) for
+tape fields, fixture configuration and generated reports.
+
+The optional Cargo feature `counters` records binding, layout, shaping,
+drawing and damage work. **Counters are disabled by default; optimizations
+do not depend on them.** Builds without that feature omit its storage and
+counting operations. [Work counters](/docs/microts-reference/#work-counters)
+explains enabling, reading and resetting the statistics.
+
+Counters measure work rather than device frame time. Measure release builds
+on the intended target with matching assets, viewport, input and build
+configuration. Include cache memory and binary size when comparing settings.
 
 ## Where to go next
 

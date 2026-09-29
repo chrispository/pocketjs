@@ -1,13 +1,14 @@
 # MicroTS reference
 
 **MicroTS compiles Vue templates or Solid TSX and TypeScript contracts into Rust.**
-This page covers the Vue form. See [Solid TSX to Rust](/docs/microts-solid/)
-for the Solid source subset.
+This page covers the shared native build tools, runtime configuration, and
+Vue template syntax. See [Solid TSX to Rust](/docs/microts-solid/) for the
+Solid source subset.
 Use [Getting started](/docs/microts/) for the build workflow and
 [Components](/docs/microts-components/) for props, events, models,
 slots, instance state, generics and shared context.
 For the connection between template bindings and generated Rust methods,
-read [How Vue becomes Rust](/docs/microts/#how-vue-becomes-rust).
+read [Compilation and runtime](/docs/microts/#compilation-and-runtime).
 The [TypeScript support reference](/docs/typescript-support/) defines the
 source subsets. The [model guide](/docs/microts-model/) explains execution
 of compiled model bodies, and [TypeScript and native code](/docs/microts-boundaries/)
@@ -19,7 +20,7 @@ not imply an AOT support contract for `.js` models or untyped view scripts.
 
 ## Files and setup
 
-An AOT component has one `<template>` and one `<script setup lang="ts">`.
+A Vue AOT component has one `<template>` and one `<script setup lang="ts">`.
 Its view-model import uses the component's basename without an extension:
 `Dial.vue` imports from `./Dial`. Other script blocks, `<style>` blocks and
 custom SFC blocks are rejected.
@@ -335,8 +336,10 @@ modules. Demo `gen/` directories are ignored by Git. Run `build` before Cargo.
 | `--strict` | Reject unannotated `number` in contracts |
 | `build --out <directory>` | Choose the generated output directory |
 | `build --no-format` | Skip `rustfmt`; the default uses it when installed |
+| `build --specialize <mode>` | Select `on` or `off` for native specialization; defaults to `on` |
+| `check --report specialization` | Report binding dependencies, resolved property candidates, and layout-region criteria |
 | `build/check --ir <file>` | Save View IR; compiled mode also writes a sibling `.model.json` with Model IR |
-| `check --json` | Print analysis and requested board results as JSON |
+| `check --json` | Print analysis and requested board results as JSON; with `--report specialization`, print the specialization report |
 | `check --boards` | Report input coverage for all existing board profiles |
 | `--board <name>` | Require a board's input profile to cover the app; a build checks before writing output |
 
@@ -354,6 +357,345 @@ A native host states its own motion level by implementing the
 An AOT build generates application source assets; a device host's build
 compiles and packages the application.
 
+## Native build options
+
+Native builds enable specialization by default. Use separate output directories
+when comparing generated source:
+
+```sh
+bun microts/compiler/cli.ts build sensor-list --specialize on
+bun microts/compiler/cli.ts build sensor-list --specialize off --out .pocket-build/sensor-reference
+```
+
+**Specialization does not change View IR, Model IR, source admission, or guest
+compilation.** `--specialize off` disables native compiler specialization; the
+core's general incremental layout remains enabled in both builds.
+
+Host build scripts use the options to
+[`buildAot`](https://github.com/pocket-stack/pocketjs/blob/main/microts/compiler/aot-build.ts)
+for environment-dependent reuse. These options apply to both Vue and Solid:
+
+| Option | Value and default |
+|---|---|
+| `specialize` | `"on"` or `"off"`; default `"on"` |
+| `specializationEnvironment` | `{ viewport: [width, height], tickRate, fontAtlases?: [{ slot, bytes }], fontSlots?: [...] }` |
+| `specializationTarget` | Request layout, text-size, and static draw-table baking for a supported target; omitted means no build-time baking |
+| `specializationShapeCacheBytes` | Nonnegative integer byte budget for the generated text-size cache; default 32 KiB |
+| `harness` | Emit logical node identities for a runtime built with the `harness` Cargo feature; default off |
+
+Environment viewport dimensions must be finite and between 1 and 32000.
+`tickRate` must be an integer from 1 through 240. Atlas slots must be valid and
+unique, and each atlas header must encode the supplied slot. Omit `fontSlots`
+to infer all potentially used slots, including inherited fonts; an explicit
+list must cover the fonts on which specialization depends.
+
+Without an explicit environment, the build reads
+`app.viewport.fixed.logical` from the `pocket.json` beside the root component,
+or uses 480×272 if absent, and sets 60 Hz. It has no font content identities
+until the host build supplies atlas bytes. The application still runs;
+environment-dependent optimizations use live layout and painting when their
+required identities are missing.
+
+**Call generated `prepare_specialization(&mut ui)` before loading styles and
+font assets.** The core records SHA-256 identities of the loaded bytes;
+revision counters alone do not identify those bytes. Generated application
+construction checks the environment, and frame boundaries check it again
+before newly mounted regions are activated.
+
+Any of these conditions disables the application's environment-dependent
+regions and baked tables:
+
+- A different viewport or tick rate.
+- Missing or mismatched style or required font identities.
+- A native text-measurement provider or streamed data in a required font slot.
+
+`specialization_enabled()` reports the result and
+`specialization_diagnostics()` returns reasons outside the model command
+channel. A mismatch after activation leaves these optimizations disabled
+until the application is mounted again. Constant folding and binding
+dependency guards do not require an environment match. Guest asset loading
+does not enable specialization hashing or region registration.
+
+## Specialization report
+
+Inspect source proofs without generating native code:
+
+```sh
+bun microts/compiler/cli.ts check sensor-list --report specialization
+bun microts/compiler/cli.ts check sensor-list --report specialization --strict --json
+```
+
+The report classifies a value by when its inputs can change:
+
+| Stage | Meaning | Examples |
+|---|---|---|
+| `Build` | Inputs are fixed by the source program | Literals, constants, expressions over fixed inputs |
+| `Mount` | Fixed for one mounted instance or keyed row | A scalar factory parameter with no write path; a keyed row's key |
+| `Frame` | Can change while mounted, or lacks a complete dependency proof | Signals, memos, replaceable props, private fields, handwritten model bindings |
+
+It lists component call sites, node bindings, dependencies, environment facts,
+existence, layout participation, per-property style values, animation writes,
+and region criteria. Property values are `Known`, finite `Candidates`, or
+`Unknown`. **Every `Frame` result includes its cause.** Private-field reads
+and handwritten model bindings have `deps: "top"`, meaning unknown
+dependencies. Aggregate factory parameters remain `Frame` because mutation
+through aliases is not excluded.
+
+The analysis accounts for focus/active style variants, transitions, timelines,
+and model animation or jump commands targeting node references. One property
+can be `Build` even when another property in the same style is `Frame`.
+`VS101` and `VS102` explain auto-width and shrink=1 region candidates.
+`--strict` prints these warnings to stderr; they do not reject the program.
+JSON findings are separate from serialized IR.
+
+**A report classification does not activate an optimization.** The report
+neither registers regions nor bakes geometry. `Build` does not authorize the
+compiler to execute model functions or external calls. Scalar folding uses
+MicroTS integer widths, bigint for wide integer arithmetic, and f32 rounding;
+unsupported operations and text conversions retain runtime evaluation.
+`Mount` does not promise one generated update: keyed rows can still update
+during reconciliation. Region activation also needs the environment and
+geometry checks below.
+
+## Layout region requirements
+
+A region root must satisfy every geometry criterion:
+
+| Property | Required value |
+|---|---|
+| Width and height | Known, finite, nonnegative pixel dimensions |
+| Grow and shrink | Both zero |
+| Basis | `auto`, or equal to the fixed dimension along the parent's proven main axis |
+| Minimum and maximum sizes | `auto`, or finite pixel limits that do not constrain the fixed dimensions |
+
+If parent direction is unknown, a numeric basis can still match both axes
+when width and height are equal. Percentage-based, dynamic, or unresolved
+dimensions do not qualify. **Fixed width and height alone do not establish
+an isolated region.** The report records each failed criterion. Text roots
+and auxiliary outputs use the general layout path.
+
+Generated roots are queued during mount. Activation follows their initial
+update, lifecycle effects, and commands, before layout. The same ordering
+applies to roots created by later conditional or keyed-list updates.
+
+Each registered region has a separate Taffy tree. Its root is a leaf in the
+parent solver. The child solver receives the parent's unrounded dimensions
+and cumulative origin, and readback retains the parent-relative root
+placement. Invalid isolation or provider changes return the tree to general
+layout. Structural changes rebuild the affected region solver; they do not
+use the general solver's retained-topology synchronization.
+
+### Layout and text-size baking
+
+`specializationTarget` supports `aarch64-apple-darwin-std` when building on
+ARM64 macOS. `host` and `aarch64-apple-darwin` select the same configuration
+on that build host. Other targets and build hosts retain live layout.
+Generated tables also check the runtime architecture, operating system, and
+`std` feature.
+
+The compiler builds a separate wasm artifact with `specialization-host`,
+which enables the core's `std` configuration. Guest wasm uses `no_std` and
+has no baking exports. The distinction affects rounding: a position of
+`0.49999997` pixels rounds to 1 in the host configuration and to 0 in the
+guest configuration. Baking also requires an integer logical viewport and
+known values for the geometry it materializes.
+
+Baked layout tables contain parent indices, rectangles, and the root's
+expected unrounded size and cumulative integer origin. Activation matches the
+live subtree against the parent indices. A size or placement mismatch discards
+the table and solves the region. Tables apply to the first solve; later
+geometry changes use Taffy. Nested registered regions and unsupported template
+geometry retain live layout. Regions whose wasm measurement or paint records
+missing glyphs retain live layout and painting to preserve `glyph_misses()`.
+
+Baked text sizes prefill a cache keyed by font slot, revision, text, tracking,
+and line height. The cache holds at most 64 entries with FIFO eviction. Its
+byte budget includes the cache header, entry table, and text storage, but
+excludes allocator overhead. Zero disables it. Font replacement invalidates
+entries; a cache hit reproduces the missing-glyph increments of runtime
+measurement. Native and streamed text use their provider's measurement path.
+An empty cache adds no lookup.
+
+## Draw cache and damage rules
+
+The core's region draw cache has a **64 KiB default word budget**. Set it with
+`core.set_draw_cache_budget(bytes)`. Zero disables dynamic word caching while
+preserving damage metadata and static draw-table reuse. The word budget does
+not include segment metadata; inspect `segment_table_bytes` alongside
+`region_cache_bytes` when assessing memory use.
+
+Node changes invalidate containing regions and affected descendant regions.
+Reuse accounts for ancestor placement, clipping, opacity, transforms, font
+revisions, and texture replacement. A changed cached placement regenerates
+words. Perspective and streamed text use the general painter; missing-glyph
+runs retain their measurement side effects.
+
+### Static draw tables
+
+Static tables are shared Rust statics generated from wasm snapshots, usable
+on the first frame when their guards match. The supported words are `RECT`,
+`GRAD_RECT`, `GLYPH_RUN`, and balanced scissor operations. Exact placement,
+size, viewport, clip, and opacity guards protect reuse. Textures, native text,
+transforms, rounded-resource branches, and nested registered regions retain
+runtime painting. Ancestor transforms, translation, clipping, or opacity
+changes also prevent use of this subset.
+
+A single-node region containing one `RECT` can patch its background color
+when the compiler proves a finite set of integer color candidates with
+nonzero alpha. All other properties and paint branches must be `Build`:
+opacity is 1, and radius, border, shadow, gradient, arc, and bevel branches
+are absent. The color must have no transition, timeline, or model-command
+writes. Other dynamic colors and opacity that can cross zero retain runtime
+painting; finite candidates alone do not prove a safe word patch.
+
+### Segment damage
+
+`RenderResources::draw_segments()` defaults to an empty implementation.
+A `DamageTracker` saves its own segment baseline on successful `commit`.
+Unchanged segments require no operation decoding. Movement and order changes
+add old and new bounds; changed segments compare their own slices, and
+structural differences damage that segment. Nested comparisons skip unchanged
+children. Proven color patches add their rectangles without decoding.
+
+The host clears each damage rectangle and replays the complete DrawList
+clipped to it. An empty segment history and table use ordinary DrawList
+comparison. Aborted or uncommitted plans do not advance the tracker's baseline.
+
+## Work counters
+
+The `counters` Cargo feature in `microts` forwards to `pocketjs-core`.
+**Counters are off by default, and specialization does not depend on them.**
+Feature-disabled builds contain no counter storage or increments.
+
+Enable the feature on the application's `microts` dependency. For an
+application under `apps/<name>/`, the dependency can be declared as:
+
+```toml
+[dependencies]
+microts = { path = "../../engine/crates/microts", features = ["counters"] }
+```
+
+Read the snapshots around the operation being measured:
+
+```rust
+let ui_work = app.ui().counters();
+let core_work = app.ui().core().counters();
+app.ui_mut().reset_counters();
+```
+
+| Counter group | Meaning |
+|---|---|
+| `set_style`, `set_prop`, `set_text` | Calls made through the typed UI wrapper |
+| `nodes_created`, `nodes_destroyed` | UI node creation and destruction, including destroyed descendants |
+| `update_at`, `memo_evaluations`, `memo_writes` | Generated update entries, binding evaluations, and writes |
+| `structure_rebuilds`, `structure_syncs` | Fresh Taffy trees and synchronization into retained trees |
+| `layout_passes`, `measure_callbacks` | Root layout computations and leaf measurements requested by Taffy |
+| `style_updates`, `taffy_nodes_created` | Layout style updates and layout-node allocations |
+| `shaping_calls`, `shaping_cache_hits` | Text shaping and text-size cache reuse |
+| `words`, `generated_words` | Total draw words and words generated by painting, excluding reused words |
+| `region_cache_hits`, `static_plan_hits` | Dynamic region-cache and generated static-table reuse |
+| Damage `decoded_ops`, `prepares`, `area`, `full_redraws` | Decoded operations, successful prepares, logical damage area, and full redraws |
+
+`reset_counters` clears accumulated UI and core work. Live `taffy_nodes`,
+`shaping_cache_bytes`, and draw-cache byte counts remain gauges.
+`DamageTracker` owns its counter snapshot and reset operation; resetting
+counters does not change its committed baseline.
+
+`segment_table_bytes` counts allocated capacities of the current draw segment
+table and tables retained in region caches. It excludes vector headers,
+region maps/stacks, allocator bookkeeping, word storage, and external damage
+tracker snapshots. `region_cache_bytes` reports retained word storage.
+
+The feature also exposes `force_layout_rebuild_for_validation()` for tests
+that compare against fresh tree construction. It is a manual test hook and
+is not called by normal application frames or enabled by specialization.
+
+## Compare native builds
+
+The native differential harness compiles specialization off and on, supplies
+shared font assets, and runs the same input recording through both programs.
+The `sensor-list` fixture uses simulated sensors and needs no device hardware.
+From the repository root:
+
+```sh
+bun microts/compiler/specialization-harness.ts sensor-list
+bun microts/compiler/specialization-harness.ts sensor-list --release
+bun microts/compiler/specialization-harness.ts sensor-list path/to/tape.json --release
+```
+
+**Comparison includes complete DrawList words, pixel hashes, glyph-miss
+counts, logical focus and hit identities, retained trees, command order,
+Ready snapshots, and cleanup commands.** Both programs check damage replay
+against a full software-rasterized framebuffer; a second tracker commits on
+alternate frames. The harness also checks that serialized View IR and Model
+IR are equal. Work counters and timing samples are excluded from equality.
+
+`bootCounters` records constructor work. Counters reset before each frame,
+which records work for that frame. The summary records build profile, host
+identity, generated Rust line counts, and executable bytes. Use `--release`
+for host measurements; debug timing is useful for diagnosis, not performance
+claims. Work counts do not measure device frame time. Measure timing, binary
+sections, and memory on the intended target with matching assets, viewport,
+input recording, and build profile.
+
+Each run writes generated programs, build logs, shared IR, full observations,
+and a summary under the ignored directory
+`.pocket-build/validation/microts-specialization/<run>/`. A mismatch reports
+the frame and artifact directory.
+
+### Tape fields and programmatic use
+
+The harness accepts a frame array, or an object with `frames`, `viewport`,
+`hz`, and `services`. These are the native differential harness's tape fields;
+the model interpreter's tape is described in the [model guide](/docs/microts-model/).
+
+| Frame field | Value |
+|---|---|
+| `buttons` | Button bitmask |
+| `axes` | Two signed relative-axis deltas |
+| `motion` | Native `MotionState` fields |
+| `touch` | Array of `[x, y]` points to hit-test after the frame |
+| `press` | `[x, y]` point whose hit node becomes the frame's input target |
+| `viewport` | Replacement `[width, height]` |
+| `fonts` | Atlas filenames resolved relative to the fixture |
+| `invalidate` | Call the generated app's invalidation entry when true |
+| `set_props` | Reapply the harness's configured props expression when true |
+| `deliveries` | Service completions matched to emitted request IDs |
+
+Each delivery has `request: { task: { region, function, call }, wait, member }`
+and `result: { kind, value }`. `kind` is `value`, `animation`, or `cancelled`;
+cancelled results omit `value`. Animation values are `ended`, `replaced`, or
+`dropped`. A value payload of `{"$i32": 3}` preserves an i32 transport value;
+ordinary JSON numbers use the model's number transport representation.
+
+[`sensor-list/tape.json`](https://github.com/pocket-stack/pocketjs/blob/main/apps/sensor-list/tape.json)
+exercises empty text, numeric changes, keyed reorder and insertion/removal,
+conditional content, focus, scrolling, and viewport changes. START changes the
+first sensor value without changing the title or footer, for card-bounded
+damage comparison.
+
+For custom fixtures,
+[`executeSpecialization`](https://github.com/pocket-stack/pocketjs/blob/main/microts/compiler/specialization-harness.ts)
+accepts `tape`, `release`, `propsExpression`, and `specializationTarget` options.
+The target option enables supported baking in the on build. `modelSource`
+and `modelExpression` supply a handwritten Rust model for a fixture without a
+compiled model.
+
+Generated logical identities combine source call sites, template positions,
+and keyed-row scopes. They do not use debug names or allocation IDs. Identity
+instrumentation needs both the emitter's `harness` option and the runtime's
+`harness` Cargo feature. Retired identities remain available to normalize
+commands queued before node destruction.
+
+Run the corresponding compiler/runtime suites with:
+
+```sh
+bun tools/test.ts --stage='MicroTS UI specialization'
+cargo test --locked --manifest-path engine/core/Cargo.toml
+cargo test --locked --manifest-path engine/core/Cargo.toml --features counters
+cargo test --locked --manifest-path engine/crates/microts/Cargo.toml --features counters,harness
+```
+
 ## Common diagnostics
 
 | Diagnostic | Fix |
@@ -370,3 +712,17 @@ compiles and packages the application.
 | Board has no motion driver at a value's level (VB106) | Subscribe to values of the board's level, or use a board whose driver fuses the required sensors |
 | Rust view-model trait implementation is incomplete | Regenerate after contract changes, then implement the trait's required methods and associated child types |
 | Compiled model source is outside the supported subset | Change the TypeScript body according to the source diagnostic, or select Rust mode and provide its native implementation |
+
+Specialization findings describe skipped optimizations rather than rejected
+source. They are separate from the admission errors above:
+
+| Finding | Meaning and response |
+|---|---|
+| `VS101` | Auto width prevents an isolated layout region. Supply a fixed pixel width if that matches the intended layout, or keep general layout. |
+| `VS102` | `shrink=1` prevents an isolated layout region. Use `shrink=0` only when the parent must not shrink this node. |
+| `VS205` | The build-time environment has no atlas bytes for a required font slot. Supply the host's atlas bytes to `specializationEnvironment`; dependent optimizations otherwise use the general path. |
+
+`VS101` and `VS102` are report diagnostics printed as warnings with `--strict`.
+`VS205` is produced by build-time environment-contract analysis;
+it is not a source-type error. Runtime environment mismatches are exposed by
+`specialization_diagnostics()` and do not enter the model command stream.
