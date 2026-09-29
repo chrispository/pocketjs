@@ -198,6 +198,16 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
     }
     return values;
   }
+  /**
+   * A value stored into Cap storage of `type`, bound to a local of that type first, so
+   * every backend bounds it there and reports an overflow under `name`.
+   */
+  function bounded(value: ModelExpr, type: AotType, name: string, into: ModelStmt[], node: ts.Node): ModelExpr {
+    if (!("capacity" in type) || type.capacity === undefined) return value;
+    const b: ModelBinder = { id: nextId++, name, type, owned: true, loc: value.loc };
+    into.push({ kind: "let", binder: b, init: make(node, { kind: "copy", value }, type), loc: value.loc });
+    return { kind: "local", id: b.id, type, ledger: emptyLedger(), loc: value.loc };
+  }
   /** Constant default values of function parameters, by parameter binder id. */
   const parameterDefaults = new Map<number, ts.Expression>();
   function args(nodes: readonly ts.Expression[], into: ModelStmt[], parameters?: ModelBinder[]): ModelExpr[] {
@@ -407,7 +417,12 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
       }
       if (name === "fill") {
         if (node.arguments.length !== 2) error(node, "fill(count, value) takes two arguments");
-        const [count, value] = inOrder(2, (index, statements) => index === 0 ? expr(node.arguments[0]!, I32, statements) : expr(node.arguments[1]!, expected?.kind === "array" ? expected.element : undefined, statements), into) as [ModelExpr, ModelExpr];
+        const element = expected?.kind === "array" ? expected.element : undefined;
+        const [count, value] = inOrder(2, (index, statements) => {
+          if (index === 0) return expr(node.arguments[0]!, I32, statements);
+          const value = expr(node.arguments[1]!, element, statements);
+          return element ? bounded(check(value, element, node.arguments[1]!), element, "fill", statements, node.arguments[1]!) : value;
+        }, into) as [ModelExpr, ModelExpr];
         return check(make(node, { kind: "builtin", name, args: [count, value] }, { kind: "array", element: value.type }), expected, node);
       }
       if (name === "embedBytes") {
@@ -534,11 +549,8 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
       const argument = node.arguments[index + 1]!, value = expr(argument, types[name][index], statements);
       if (copies && index === source) { if (value.type.kind !== "array" || !sameType(value.type.element, element)) error(argument, `${name} source must have the target's element type`); return value; }
       const checked = check(value, types[name][index], argument);
-      if (index !== stored || !("capacity" in element) || element.capacity === undefined) return temp(checked, statements);
       // A value stored into Cap elements is bounded, and reported under the array's name, before the call.
-      const b: ModelBinder = { id: nextId++, name: target.binding.name, type: element, owned: true, loc: checked.loc };
-      statements.push({ kind: "let", binder: b, init: make(argument, { kind: "copy", value: checked }, element), loc: checked.loc });
-      return { kind: "local", id: b.id, type: element, ledger: emptyLedger(), loc: checked.loc };
+      return index === stored ? temp(bounded(checked, element, target.binding.name, statements, argument), statements) : temp(checked, statements);
     }, into);
     const result = name === "pop" || name === "removeAt" ? element : VOID;
     const value = make(node, { kind: "mutate", op: name, target: placeTarget(target), args }, result);

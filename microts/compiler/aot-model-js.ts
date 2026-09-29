@@ -100,14 +100,14 @@ export function generateModelJavaScript(program: ModelProgram, module: ModelModu
       case "sequence": return `(() => {${block(e.body)}return ${expr(e.value)};})()`;
       case "constant": return `${stdAlias}.copy(__c${e.id})`;
       case "mutate": {
-        // Arguments are evaluated, like the target, before a missing target skips the change,
-        // so their effects happen as they do in Rust and the interpreter.
+        // As in Rust and the interpreter, the arguments run first and the target place is read
+        // after them; a missing target then skips the change.
         const missing = defaultValue(e.type), params = e.args.map((_, index) => `__a${index}`);
         const values = e.args.map(value => e.op === "removeAt" ? expr(value) : `${stdAlias}.copy(${expr(value)})`);
         const call = e.op === "removeAt" ? `(__a0>=0&&__a0<__t.length?__t.splice(__a0,1)[0]:${missing})` : e.op === "pop" ? `(__t.length?__t.pop():${missing})` : `${stdAlias}.${e.op}(__t,${params.join(",")})`;
         // A change below a field reaches guest views through the field revision.
         const field = e.target.kind === "field" || e.target.kind === "path" && e.target.root.kind === "field";
-        return `((${["__t", ...params].join(",")})=>{if(__t===undefined)return ${missing};${field ? `const __v=${call};__r.fieldChanged();return __v;` : `return ${call};`}})(${[place(e.target, steps(e.target)), ...values].join(",")})`;
+        return `((${params.join(",")})=>{const __t=${place(e.target, steps(e.target))};if(__t===undefined)return ${missing};${field ? `const __v=${call};__r.fieldChanged();return __v;` : `return ${call};`}})(${values.join(",")})`;
       }
     }
   };
@@ -161,7 +161,8 @@ export function generateModelJavaScript(program: ModelProgram, module: ModelModu
         if (target.kind === "element") return `{const __index=${expr(target.index)};const __value=${stdAlias}.copy(${expr(s.value)});if(Number.isInteger(__index)&&__index>=0&&__index<${local(target.owner)}.length)${local(target.owner)}[__index]=__value;}`;
         if (target.kind === "path") {
           const last = target.steps.at(-1)!;
-          return `{const __owner=${place(target, target.steps.slice(0, -1))};${last.kind === "index" ? `const __index=${expr(last.index)};` : ""}const __value=${stdAlias}.copy(${expr(s.value)});${last.kind === "member" ? `if(__owner!==undefined)__owner[${q(last.name)}]=__value;` : "if(__owner!==undefined&&Number.isInteger(__index)&&__index>=0&&__index<__owner.length)__owner[__index]=__value;"}${target.root.kind === "field" ? "__r.fieldChanged();" : ""}}`;
+          // The value runs before the owner is read, as in Rust and the interpreter.
+          return `{const __value=${stdAlias}.copy(${expr(s.value)});const __owner=${place(target, target.steps.slice(0, -1))};${last.kind === "index" ? `const __index=${expr(last.index)};` : ""}${last.kind === "member" ? `if(__owner!==undefined)__owner[${q(last.name)}]=__value;` : "if(__owner!==undefined&&Number.isInteger(__index)&&__index>=0&&__index<__owner.length)__owner[__index]=__value;"}${target.root.kind === "field" ? "__r.fieldChanged();" : ""}}`;
         }
         return `${"id" in target ? target.kind === "local" ? local(target.id) : `__fields[${target.id}]` : `${local(target.owner)}[${q(target.name)}]`} = ${stdAlias}.copy(${expr(s.value)});`;
       }

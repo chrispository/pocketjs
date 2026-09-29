@@ -439,7 +439,7 @@ class ModelRust {
     if (type.kind === "option" && storage.kind !== "option" && e.kind !== "undefined") return rc(rp("Some"), this.coerce({ ...e, type: storage }, type.value, name, capacity));
     const value = this.expr(e, capacity, name);
     const sourceType = this.sourceType(e), source = "capacity" in sourceType ? sourceType.capacity : undefined;
-    const contextual = ["literal", "binary", "template", "array", "constant"].includes(e.kind) || e.kind === "builtin" && ["map", "filter", "String", "fill"].includes(e.name);
+    const contextual = ["literal", "binary", "template", "array", "constant"].includes(e.kind) || e.kind === "builtin" && e.name !== "copy";
     const actual = contextual ? capacity ?? source : source;
     if (type.kind === "string" && actual !== capacity) return capacity === undefined
       ? rm(rm(value, "as_str"), "to_owned")
@@ -581,7 +581,11 @@ class ModelRust {
         return this.returns(e.body) ? rc({ kind: "closure", params: [], body: value }) : value;
       }
       // A static constant copied where a Cap array is expected fills bounded storage.
-      case "constant": return capacity !== undefined && e.type.kind === "array" ? this.bounded(rm(rm(rp(this.constantName(e.id)), "iter"), "cloned"), e.type.element, capacity, capacityName) : rm(rp(this.constantName(e.id)), "to_vec");
+      case "constant": {
+        const constant = rp(this.constantName(e.id));
+        if (e.type.kind === "array" && e.type.length !== undefined) return constant;
+        return capacity !== undefined && e.type.kind === "array" ? this.bounded(rm(rm(constant, "iter"), "cloned"), e.type.element, capacity, capacityName) : rm(constant, "to_vec");
+      }
       case "mutate": return this.mutate(e);
     }
   }
@@ -593,7 +597,18 @@ class ModelRust {
     if (func.async) return rm(self, `start_${id}`, ...callArgs);
     return rm(self, `${this.mutable ? "fn" : "render_fn"}_${id}`, ...callArgs);
   }
+  /**
+   * A built-in call. map, filter and String build bounded storage themselves; the other
+   * built-ins that return an array or a string are bounded where a Cap type is expected.
+   */
   builtin(e: Extract<ModelExpr, { kind: "builtin" }>, capacity?: number, capacityName = "value"): RustExpr {
+    const value = this.builtinValue(e, capacity, capacityName);
+    if (capacity === undefined || ["map", "filter", "String", "copy"].includes(e.name)) return value;
+    if (e.type.kind === "array" && e.type.length === undefined) return this.bounded(value, e.type.element, capacity, capacityName);
+    if (e.type.kind === "string") return rc({ kind: "path", path: ["microts", "model", "bounded_string"], typeArgs: [{ kind: "const", value: capacity }] }, ref(value), rl(capacityName));
+    return value;
+  }
+  builtinValue(e: Extract<ModelExpr, { kind: "builtin" }>, capacity?: number, capacityName = "value"): RustExpr {
     const args = e.args.map(arg => this.expr(arg));
     if (e.name === "copy") return args[0]!;
     if (e.name === "equals") return bin("==", args[0]!, args[1]!);
@@ -612,10 +627,7 @@ class ModelRust {
     // usize converts as u32 on every target, as the JavaScript backends do.
     if (e.name === "usize") return cast(cast(this.unwrapScalar(args[0]!, e.args[0]!.type), rt("u32")), rt("usize"));
     if ((MICROTS_NUMERIC_TYPES as readonly string[]).includes(e.name)) return cast(this.unwrapScalar(args[0]!, e.args[0]!.type), rt(e.name));
-    if (e.name === "fill") {
-      const value = rc(rp("microts", "builtins", "fill"), args[0]!, args[1]!);
-      return capacity !== undefined && e.type.kind === "array" ? this.bounded(value, e.type.element, capacity, capacityName) : value;
-    }
+    if (e.name === "fill") return rc(rp("microts", "builtins", "fill"), args[0]!, args[1]!);
     if (e.name === "embedBytes") return rm({ kind: "macro", name: ["include_bytes"], args: [this.embeddedPath(e)] }, "to_vec");
     if (e.name === "codePoints") {
       // The string is read in place, like len()'s argument.
@@ -801,9 +813,10 @@ class ModelRust {
     for (const parameter of func.params) this.binders.set(parameter.id, parameter);
     const depth = this.current.kind === "pure" ? rp("depth") : field("depth");
     const body = this.statements(func.body);
-    // The frontend admits a function that returns a value only when TypeScript finds its end
-    // unreachable; a body whose end Rust cannot see as unreachable ends in unreachable!().
-    const tail: RustExpr | undefined = func.returns.kind !== "void" && !this.diverges(func.body) ? { kind: "macro", name: ["unreachable"], args: [rl(`${func.name} returns on every path`)] } : undefined;
+    // Falling off the end returns undefined, which is None for an optional return type. For
+    // other return types TypeScript has found the end unreachable, and a body whose end Rust
+    // cannot see as unreachable ends in unreachable!().
+    const tail: RustExpr | undefined = func.returns.kind === "void" || this.diverges(func.body) ? undefined : func.returns.kind === "option" ? rp("None") : { kind: "macro", name: ["unreachable"], args: [rl(`${func.name} returns on every path`)] };
     const expression: RustExpr = rc({ kind: "closure", params: [], body: block(body, tail) });
     // Parameters the body assigns or changes in place are declared mut.
     const assigned = this.assignedIds(func.body);

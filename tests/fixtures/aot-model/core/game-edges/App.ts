@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { copyRange, copyRect, embedBytes, fill, fillRange, fillRect, idiv, imod, len, pow, push, removeAt, truncate, f32, f64, i8, i16, i32, i64, u8, u16, usize, type Cap, type f64 as F64, type i32 as I32, type u8 as U8, type i8 as I8, type u16 as U16 } from "@pocketjs/framework/solid/std";
+import { codePoints, copyRange, copyRect, embedBytes, fill, fillRange, fillRect, fromCodePoint, idiv, imod, len, pow, push, removeAt, truncate, f32, f64, i8, i16, i32, i64, u8, u16, usize, type Cap, type f64 as F64, type i32 as I32, type u8 as U8, type i8 as I8, type u16 as U16 } from "@pocketjs/framework/solid/std";
 type Id = I32 & { readonly __newtype?: "Id" };
 type Name = string & { readonly __newtype?: "Name" };
 type Byte = I8 & { readonly __newtype?: "Byte" };
@@ -10,6 +10,7 @@ export const [result, setResult] = createSignal<I32[]>([]);
 const TABLE: Cap<I32[], 4> = [1, 2];
 export const [table, setTable] = createSignal<Cap<I32[], 4>>(TABLE);
 const PLAIN: I32[] = [3, 4, 5];
+const PAIR: [I32, I32] = [1, 2];
 export const [plain, setPlain] = createSignal<Cap<I32[], 4>>(PLAIN);
 const NAMES: Name[] = ["ab", "c"];
 const BYTES: U8[] = embedBytes("./bytes.bin");
@@ -51,6 +52,19 @@ function pick(k: I32) {
     default:
       return 20;
   }
+}
+function maybe(flag: boolean): I32 | undefined {
+  if (flag) return 5;
+}
+let target: I32[] = [0];
+function replace(): I32[] {
+  target = [5];
+  return [7];
+}
+let grid: I32[][] = [[0]];
+function regrid(): I32 {
+  grid = [[5]];
+  return 7;
 }
 let sourced = 0;
 function source(): I32[] {
@@ -153,5 +167,18 @@ export function press(): void {
   push(holes[gap], i32(next()));
   push(out, sourced);
   push(out, i32(next()));
+  // An optional return type falls off the end as undefined.
+  push(out, (maybe(false) ?? 9) + (maybe(true) ?? 9));
+  // Writes read their target place after their value and arguments.
+  copyRange(target, 0, replace(), 0, 1);
+  grid[0][0] = regrid();
+  push(out, target[0] + grid[0][0]);
+  // Fixed-length constants, and built-ins that return arrays or strings, in Cap places.
+  const pair: [I32, I32] = PAIR;
+  const points: Cap<I32[], 4> = codePoints("ab");
+  const embedded: Cap<U8[], 4> = embedBytes("./bytes.bin");
+  const letter: Cap<string, 2> = fromCodePoint(65);
+  const chosen: Cap<I32[], 4> = len(points) > 1 ? codePoints("xyz") : codePoints("x");
+  push(out, pair[0] + pair[1] + len(points) + len(embedded) + len(letter) + len(chosen));
   setResult(out);
 }
