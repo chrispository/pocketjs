@@ -575,7 +575,12 @@ class ModelRust {
     }
     if ((MICROTS_NUMERIC_TYPES as readonly string[]).includes(e.name)) return cast(this.unwrapScalar(args[0]!, e.args[0]!.type), rt(e.name));
     if (e.name === "embedBytes") return rm({ kind: "macro", name: ["include_bytes"], args: [this.embeddedPath(e)] }, "to_vec");
-    if (e.name === "codePoints") return rc(rp("microts", "builtins", "code_points"), ref(args[0]!));
+    if (e.name === "codePoints") {
+      // The string is read in place, like len()'s argument.
+      const place = this.borrow(e.args[0]!), chain = place ? undefined : this.readChain(e.args[0]!);
+      if (chain) return block(chain.statements, rm(rm(chain.value, "map", { kind: "closure", params: [rn("value")], body: rc(rp("microts", "builtins", "code_points"), rp("value")) }), "unwrap_or_default"));
+      return rc(rp("microts", "builtins", "code_points"), ref(place ?? args[0]!));
+    }
     if (e.name === "fromCodePoint") return rc(rp("microts", "builtins", "from_code_point"), args[0]!);
     if (["map", "filter", "find", "some"].includes(e.name)) {
       const collection = `items_${this.serial++}`, closure = e.args[1];
@@ -596,6 +601,22 @@ class ModelRust {
     return this.wrapScalar(rc(rp("microts", "builtins", e.name), ...args.map((arg, index) => this.unwrapScalar(arg, e.args[index]!.type))), e.type);
   }
   statements(body: ModelBlock): RustStatement[] { return body.stmts.flatMap(stmt => this.statement(stmt)); }
+  /** Ids of the locals and parameters a block assigns or changes in place. */
+  assignedIds(body: ModelBlock): Set<number> {
+    const ids = new Set<number>();
+    const walk = (value: unknown): void => {
+      if (!value || typeof value !== "object") return;
+      if (Array.isArray(value)) { value.forEach(walk); return; }
+      const node = value as Record<string, any>;
+      if ((node.kind === "assign" || node.kind === "mutate") && node.target) {
+        const t = node.target as ModelTarget;
+        ids.add(t.kind === "path" ? t.root.id : "id" in t ? t.id : t.owner);
+      }
+      for (const [key, child] of Object.entries(value)) if (key !== "loc" && key !== "ledger" && key !== "type") walk(child);
+    };
+    walk(body);
+    return ids;
+  }
   /** Whether a block contains a return outside nested lambdas. */
   returns(body: ModelBlock): boolean {
     let found = false;
@@ -703,7 +724,10 @@ class ModelRust {
     const depth = this.current.kind === "pure" ? rp("depth") : field("depth");
     const body = this.statements(func.body);
     const expression: RustExpr = rc({ kind: "closure", params: [], body: block(body) });
-    const result = fn(this.current.kind === "pure" ? `pure_${func.id}` : `${render ? "render_fn" : "fn"}_${func.id}`, [ ...(this.current.kind === "pure" ? [param("depth", rr(rt("Depth")))] : [receiver(!render)]), ...func.params.map(p => param(this.name(p.id), this.type(p.type, false, p.capacity))) ], rb([re(rm(depth, "enter", rl(func.name))), let_("result", expression), re(rm(depth, "leave"))], rp("result")), this.type(func.returns));
+    // Parameters the body assigns or changes in place are declared mut.
+    const assigned = this.assignedIds(func.body);
+    const params = func.params.map(p => ({ pattern: rn(this.name(p.id), assigned.has(p.id)), type: this.type(p.type, false, p.capacity) }));
+    const result = fn(this.current.kind === "pure" ? `pure_${func.id}` : `${render ? "render_fn" : "fn"}_${func.id}`, [ ...(this.current.kind === "pure" ? [param("depth", rr(rt("Depth")))] : [receiver(!render)]), ...params ], rb([re(rm(depth, "enter", rl(func.name))), let_("result", expression), re(rm(depth, "leave"))], rp("result")), this.type(func.returns));
     this.mutable = previous; this.returnType = previousReturn; return result;
   }
   trace(kind: string, id: number, name: string, value: RustExpr = rp("Value", "Unit"), extras: Record<string, RustExpr> = {}): RustStatement {

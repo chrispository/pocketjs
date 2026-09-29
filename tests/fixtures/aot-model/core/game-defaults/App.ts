@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { fill, len, push, type i32 as I32 } from "@pocketjs/framework/solid/std";
+import { codePoints, fill, len, push, type i32 as I32 } from "@pocketjs/framework/solid/std";
 export const [result, setResult] = createSignal<I32[]>([]);
 const BASE = 10;
 const W = 3;
@@ -17,6 +17,15 @@ function total(a: I32, b: I32 = 2, list: I32[] = [], flag: boolean = false, p: P
   for (const v of list) sum += v;
   return flag ? -sum : sum;
 }
+// Parameters are the callee's own copies, which it may change.
+function stepped(x: I32, list: I32[]): I32 {
+  x += 4;
+  push(list, x);
+  list[0] = 9;
+  return x + len(list) + list[0];
+}
+let words: string[] = ["ab", "cde"];
+let label: string = "xyz";
 export function press(): void {
   const out: I32[] = [];
   push(out, total(1));
@@ -26,5 +35,9 @@ export function press(): void {
   push(out, total(0, 0, [], false, { x: 5, y: 5 }, 0));
   push(out, len(grid));
   push(out, scaled(2));
+  const mine: I32[] = [1];
+  push(out, stepped(1, mine));
+  push(out, len(mine));
+  push(out, len(codePoints(words[1])) + len(codePoints(label)));
   setResult(out);
 }
