@@ -100,11 +100,14 @@ export function generateModelJavaScript(program: ModelProgram, module: ModelModu
       case "sequence": return `(() => {${block(e.body)}return ${expr(e.value)};})()`;
       case "constant": return `${stdAlias}.copy(__c${e.id})`;
       case "mutate": {
-        const args = e.args.map(value => expr(value)), missing = defaultValue(e.type);
-        const call = e.op === "removeAt" ? `((__i)=>__i>=0&&__i<__t.length?__t.splice(__i,1)[0]:${missing})(${args[0]})` : e.op === "pop" ? `(__t.length?__t.pop():${missing})` : `${stdAlias}.${e.op}(__t,${args.map(arg => `${stdAlias}.copy(${arg})`).join(",")})`;
+        // Arguments are evaluated, like the target, before a missing target skips the change,
+        // so their effects happen as they do in Rust and the interpreter.
+        const missing = defaultValue(e.type), params = e.args.map((_, index) => `__a${index}`);
+        const values = e.args.map(value => e.op === "removeAt" ? expr(value) : `${stdAlias}.copy(${expr(value)})`);
+        const call = e.op === "removeAt" ? `(__a0>=0&&__a0<__t.length?__t.splice(__a0,1)[0]:${missing})` : e.op === "pop" ? `(__t.length?__t.pop():${missing})` : `${stdAlias}.${e.op}(__t,${params.join(",")})`;
         // A change below a field reaches guest views through the field revision.
         const field = e.target.kind === "field" || e.target.kind === "path" && e.target.root.kind === "field";
-        return `((__t)=>{if(__t===undefined)return ${missing};${field ? `const __v=${call};__r.fieldChanged();return __v;` : `return ${call};`}})(${place(e.target, steps(e.target))})`;
+        return `((${["__t", ...params].join(",")})=>{if(__t===undefined)return ${missing};${field ? `const __v=${call};__r.fieldChanged();return __v;` : `return ${call};`}})(${[place(e.target, steps(e.target)), ...values].join(",")})`;
       }
     }
   };

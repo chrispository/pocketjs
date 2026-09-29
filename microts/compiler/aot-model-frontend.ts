@@ -529,10 +529,16 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
     if (copies && (!primitive(element) || scalarBase(element).kind === "string")) error(node.arguments[0]!, `${name} requires numeric, boolean or enum elements`);
     const types: Record<MutationName, (AotType | undefined)[]> = { push: [element], pop: [], insert: [I32, element], removeAt: [I32], clear: [], truncate: [I32], fillRange: [I32, I32, element], copyRange: [I32, target.type, I32, I32, element], fillRect: [I32, I32, I32, I32, element], copyRect: [I32, I32, target.type, I32, I32, I32, I32, element] };
     // The source of a copy stays a place, read in place, unless a later argument's effects force it into a temporary.
+    const stored = ({ push: 0, insert: 1, fillRange: 2, fillRect: 4 } as Partial<Record<MutationName, number>>)[name];
     const args = inOrder(node.arguments.length - 1, (index, statements) => {
       const argument = node.arguments[index + 1]!, value = expr(argument, types[name][index], statements);
       if (copies && index === source) { if (value.type.kind !== "array" || !sameType(value.type.element, element)) error(argument, `${name} source must have the target's element type`); return value; }
-      return temp(check(value, types[name][index], argument), statements);
+      const checked = check(value, types[name][index], argument);
+      if (index !== stored || !("capacity" in element) || element.capacity === undefined) return temp(checked, statements);
+      // A value stored into Cap elements is bounded, and reported under the array's name, before the call.
+      const b: ModelBinder = { id: nextId++, name: target.binding.name, type: element, owned: true, loc: checked.loc };
+      statements.push({ kind: "let", binder: b, init: make(argument, { kind: "copy", value: checked }, element), loc: checked.loc });
+      return { kind: "local", id: b.id, type: element, ledger: emptyLedger(), loc: checked.loc };
     }, into);
     const result = name === "pop" || name === "removeAt" ? element : VOID;
     const value = make(node, { kind: "mutate", op: name, target: placeTarget(target), args }, result);
@@ -913,10 +919,11 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
           if (mutable && exported(node) && model.kind !== "state") error(d, "private mutable fields cannot be exported");
           const b = register(d.name, { id: nextId++, name: d.name.text, kind: mutable ? "field" : "constant", type: type(d.type, d.name.text) ?? VOID, node: d, declaration: d, module: model, capacity: capacity(d.type) });
           const hostName = mutable && model.kind === "state" && exported(node) ? `${basename(model.file, ".ts").replace(/[^A-Za-z0-9]+/g, "_").toLowerCase()}_${b.name}` : undefined;
-          if (hostName !== undefined) {
-            const other = hostNames.get(hostName);
-            if (other !== undefined) error(d.name, `state fields of ${other} and ${model.file} share the host accessor ${hostName}; rename the field or the file`);
-            hostNames.set(hostName, model.file);
+          // Each field takes a getter and a _mut accessor; fields x and x_mut would both take x_mut.
+          if (hostName !== undefined) for (const accessor of [hostName, `${hostName}_mut`]) {
+            const other = hostNames.get(accessor);
+            if (other !== undefined) error(d.name, `state fields of ${other} and ${model.file} share the host accessor ${accessor}; rename a field or a file`);
+            hostNames.set(accessor, model.file);
           }
           if (mutable) model.fields.push({ id: b.id, name: b.name, type: b.type, capacity: b.capacity, seed: make(init, { kind: "undefined" }, VOID), loc: loc(d), ...(hostName !== undefined ? { hostName } : {}) });
         } continue;
@@ -974,6 +981,10 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
       const collect = (block: ModelBlock): void => { for (const s of block.stmts) { if (s.kind === "return") returns.push(s.value?.type ?? VOID); else if (s.kind === "if") { collect(s.then); if (s.else) collect(s.else); } else if (s.kind === "switch") { for (const c of s.cases) collect(c.body); } else if (["for", "forOf", "while", "batch", "untrack"].includes(s.kind)) collect((s as { body: ModelBlock }).body); } };
       collect(currentFunction.body); currentFunction.returns = returns[0] ?? VOID;
       if (!returns.every(t => sameType(t, currentFunction!.returns))) error(item.node, "function returns require one consistent contract type");
+      // TypeScript adds undefined to the inferred type when the end of the body is reachable.
+      const signature = checker.getSignatureFromDeclaration(item.node), inferred = signature && checker.getReturnTypeOfSignature(signature);
+      const undefinedIn = (t: ts.Type): boolean => !!(t.flags & ts.TypeFlags.Undefined) || t.isUnion() && t.types.some(undefinedIn);
+      if (currentFunction.returns.kind !== "void" && currentFunction.returns.kind !== "option" && inferred && undefinedIn(inferred)) error(item.node, "a function that returns a value must return one on every path; add a final return or annotate the return type");
       item.b.type = currentFunction.returns;
     }
     current = beforeModule; currentFunction = beforeFunction; callbackReturnType = beforeReturnType; item.state = "done";

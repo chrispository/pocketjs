@@ -389,6 +389,10 @@ class ModelRust {
   scalarType(type: AotType): AotType { const declaration = type.kind === "named" ? this.declarations.get(type.name) : undefined; return declaration?.kind === "newtype" ? this.scalarType(declaration.base) : type; }
   unwrapScalar(value: RustExpr, type: AotType): RustExpr { const declaration = type.kind === "named" ? this.declarations.get(type.name) : undefined; return declaration?.kind === "newtype" ? this.unwrapScalar(rf(value, 0), declaration.base) : value; }
   wrapScalar(value: RustExpr, type: AotType): RustExpr { const declaration = type.kind === "named" ? this.declarations.get(type.name) : undefined; return declaration?.kind === "newtype" ? rc(rp(type.kind === "named" ? type.name : declaration.name), this.wrapScalar(value, declaration.base)) : value; }
+  /** A heapless::Vec with room for `capacity` elements, filled from `values`. */
+  bounded(values: RustExpr, element: AotType, capacity: number, name: string): RustExpr {
+    return rc({ kind: "path", path: ["microts", "model", "bounded_array"], typeArgs: [this.type(element), { kind: "const", value: capacity }] }, values, rl(name));
+  }
   /** A reference to a value of `type`, borrowed as its scalar when `type` is a newtype. */
   scalarRef(reference: RustExpr, type: AotType): RustExpr { return this.scalarType(type) === type ? reference : ref(this.unwrapScalar(reference, type)); }
   displayValue(value: RustExpr, type: AotType): RustExpr { const base = this.scalarType(type); return base.kind === "number" && base.name === "f32" ? cast(this.unwrapScalar(value, type), rt("f64")) : value; }
@@ -435,7 +439,7 @@ class ModelRust {
     if (type.kind === "option" && storage.kind !== "option" && e.kind !== "undefined") return rc(rp("Some"), this.coerce({ ...e, type: storage }, type.value, name, capacity));
     const value = this.expr(e, capacity, name);
     const sourceType = this.sourceType(e), source = "capacity" in sourceType ? sourceType.capacity : undefined;
-    const contextual = ["literal", "binary", "template", "array"].includes(e.kind) || e.kind === "builtin" && ["map", "filter", "String"].includes(e.name);
+    const contextual = ["literal", "binary", "template", "array", "constant"].includes(e.kind) || e.kind === "builtin" && ["map", "filter", "String", "fill"].includes(e.name);
     const actual = contextual ? capacity ?? source : source;
     if (type.kind === "string" && actual !== capacity) return capacity === undefined
       ? rm(rm(value, "as_str"), "to_owned")
@@ -576,7 +580,8 @@ class ModelRust {
         const value = block(this.expressionBody(e.body, e.type), this.expr(e.value, capacity, capacityName));
         return this.returns(e.body) ? rc({ kind: "closure", params: [], body: value }) : value;
       }
-      case "constant": return rm(rp(this.constantName(e.id)), "to_vec");
+      // A static constant copied where a Cap array is expected fills bounded storage.
+      case "constant": return capacity !== undefined && e.type.kind === "array" ? this.bounded(rm(rm(rp(this.constantName(e.id)), "iter"), "cloned"), e.type.element, capacity, capacityName) : rm(rp(this.constantName(e.id)), "to_vec");
       case "mutate": return this.mutate(e);
     }
   }
@@ -607,7 +612,10 @@ class ModelRust {
     // usize converts as u32 on every target, as the JavaScript backends do.
     if (e.name === "usize") return cast(cast(this.unwrapScalar(args[0]!, e.args[0]!.type), rt("u32")), rt("usize"));
     if ((MICROTS_NUMERIC_TYPES as readonly string[]).includes(e.name)) return cast(this.unwrapScalar(args[0]!, e.args[0]!.type), rt(e.name));
-    if (e.name === "fill") return rc(rp("microts", "builtins", "fill"), args[0]!, args[1]!);
+    if (e.name === "fill") {
+      const value = rc(rp("microts", "builtins", "fill"), args[0]!, args[1]!);
+      return capacity !== undefined && e.type.kind === "array" ? this.bounded(value, e.type.element, capacity, capacityName) : value;
+    }
     if (e.name === "embedBytes") return rm({ kind: "macro", name: ["include_bytes"], args: [this.embeddedPath(e)] }, "to_vec");
     if (e.name === "codePoints") {
       // The string is read in place, like len()'s argument.
@@ -650,6 +658,36 @@ class ModelRust {
     };
     walk(body);
     return ids;
+  }
+  /**
+   * Whether a block never completes: it ends in a return, in branches that all end
+   * in one, or in a loop on the literal true that nothing breaks.
+   */
+  diverges(body: ModelBlock): boolean {
+    const last = body.stmts.at(-1);
+    if (!last) return false;
+    switch (last.kind) {
+      case "return": return true;
+      case "if": return !!last.else && this.diverges(last.then) && this.diverges(last.else);
+      case "switch": return last.cases.some(c => !c.value) && last.cases.every(c => this.diverges(c.body));
+      case "batch": case "untrack": return this.diverges(last.body);
+      case "while": {
+        let broken = false;
+        const walk = (value: unknown): void => {
+          if (broken || !value || typeof value !== "object") return;
+          if (Array.isArray(value)) { value.forEach(walk); return; }
+          const node = value as { kind?: string; loop?: number };
+          if (node.kind === "break" && node.loop === last.loop) { broken = true; return; }
+          if (node.kind === "lambda") return;
+          for (const [key, child] of Object.entries(value)) if (!["loc", "ledger", "type"].includes(key)) walk(child);
+        };
+        walk(last.body);
+        if (broken) return false;
+        const forever = last.condition.kind === "literal" && last.condition.value === true;
+        return forever || !!last.post && this.diverges(last.body) && !this.continued.has(last.loop);
+      }
+      default: return false;
+    }
   }
   /** Whether a block contains a return outside nested lambdas. */
   returns(body: ModelBlock): boolean {
@@ -721,7 +759,9 @@ class ModelRust {
         // a function that returns from inside it type-checks as TypeScript's does.
         const forever = s.condition.kind === "literal" && s.condition.value === true;
         if (forever) return [{ kind: "loop", label: body.label, body: rb([work("LoopIteration"), ...body.statements, ...update]) }];
-        if (s.post) return [{ kind: "loop", label: body.label, body: rb([work("LoopIteration"), ...body.statements, condition({ kind: "unary", operator: "!", expr: this.expr(s.condition) }, [{ kind: "break" }])]) }];
+        // A do-while body that always returns, with no continue, never reaches its condition.
+        const checked = !(this.diverges(s.body) && !this.continued.has(s.loop));
+        if (s.post) return [{ kind: "loop", label: body.label, body: rb([work("LoopIteration"), ...body.statements, ...(checked ? [condition({ kind: "unary", operator: "!", expr: this.expr(s.condition) }, [{ kind: "break" }])] : [])]) }];
         return [{ kind: "while", condition: this.expr(s.condition), label: body.label, body: rb([work("LoopIteration"), ...body.statements, ...update]) }];
       });
       case "break": return [{ kind: "break", label: this.loopLabels.get(s.loop)!.loop }];
@@ -761,7 +801,10 @@ class ModelRust {
     for (const parameter of func.params) this.binders.set(parameter.id, parameter);
     const depth = this.current.kind === "pure" ? rp("depth") : field("depth");
     const body = this.statements(func.body);
-    const expression: RustExpr = rc({ kind: "closure", params: [], body: block(body) });
+    // The frontend admits a function that returns a value only when TypeScript finds its end
+    // unreachable; a body whose end Rust cannot see as unreachable ends in unreachable!().
+    const tail: RustExpr | undefined = func.returns.kind !== "void" && !this.diverges(func.body) ? { kind: "macro", name: ["unreachable"], args: [rl(`${func.name} returns on every path`)] } : undefined;
+    const expression: RustExpr = rc({ kind: "closure", params: [], body: block(body, tail) });
     // Parameters the body assigns or changes in place are declared mut.
     const assigned = this.assignedIds(func.body);
     const params = func.params.map(p => ({ pattern: rn(this.name(p.id), assigned.has(p.id)), type: this.type(p.type, false, p.capacity) }));
@@ -960,7 +1003,10 @@ class ModelRust {
     }
     const taken = new Set([...methods, ...traitMethods].map(method => method.name));
     for (const f of module.fields) if (f.hostName) {
-      for (const name of [f.hostName, `${f.hostName}_mut`]) if (taken.has(name)) throw new Error(`The state accessor ${name} of field ${f.name} has the name of a model method; rename the field or its file`);
+      for (const name of [f.hostName, `${f.hostName}_mut`]) {
+        if (taken.has(name)) throw new Error(`The state accessor ${name} of field ${f.name} has the name of a model method; rename the field or its file`);
+        taken.add(name);
+      }
       const type = this.type(f.type, false, f.capacity);
       methods.push(fn(f.hostName, [receiver()], rb([], ref(field(this.name(f.id)))), rr(type), true));
       methods.push(fn(`${f.hostName}_mut`, [receiver(true)], rb([], ref(field(this.name(f.id)), true)), rr(type, true), true));

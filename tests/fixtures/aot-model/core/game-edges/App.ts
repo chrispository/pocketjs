@@ -9,6 +9,8 @@ interface Bank { data: I32[] }
 export const [result, setResult] = createSignal<I32[]>([]);
 const TABLE: Cap<I32[], 4> = [1, 2];
 export const [table, setTable] = createSignal<Cap<I32[], 4>>(TABLE);
+const PLAIN: I32[] = [3, 4, 5];
+export const [plain, setPlain] = createSignal<Cap<I32[], 4>>(PLAIN);
 const NAMES: Name[] = ["ab", "c"];
 const BYTES: U8[] = embedBytes("./bytes.bin");
 let rows: I32[][] = [[1, 2, 3]];
@@ -36,6 +38,24 @@ function six() {
   do {
     return 6;
   } while (true);
+}
+function seven() {
+  do {
+    return 7;
+  } while (false);
+}
+function pick(k: I32) {
+  switch (k) {
+    case 1:
+      return 10;
+    default:
+      return 20;
+  }
+}
+let sourced = 0;
+function source(): I32[] {
+  sourced += 1;
+  return [1];
 }
 export function press(): void {
   const out: I32[] = [];
@@ -122,5 +142,16 @@ export function press(): void {
   push(out, i32(big * big));
   // Returns inside loops set the inferred return type.
   push(out, five() + six());
+  push(out, seven() + pick(1) + pick(2));
+  // Plain constants and fill() seed Cap arrays.
+  const filled: Cap<I32[], 4> = fill(2, 1);
+  push(out, len(plain()) + len(filled) + filled[1]);
+  // Arguments run even when the target element is missing.
+  const holes: I32[][] = [];
+  const gap = len(holes) + 1;
+  copyRange(holes[gap], 0, source(), 0, 1);
+  push(holes[gap], i32(next()));
+  push(out, sourced);
+  push(out, i32(next()));
   setResult(out);
 }

@@ -255,7 +255,8 @@ destructuring, optional and rest parameters, function type parameters and
 generators are not supported; a trailing parameter may default to a literal or
 constant (see the [native game subset](#native-game-subset)). Return types are
 inferred from the body's return statements, including those in loops and
-`switch` cases; annotate public signatures.
+`switch` cases; a function that returns a value returns one on every path.
+Annotate public signatures.
 
 Functions of a model can read and update that model. Imported pure functions
 cannot read model state, emit host commands or start tasks. Calls evaluate
@@ -402,7 +403,7 @@ Model IR to JavaScript, and the reference interpreter executes it.
 | Operators | `%` on numbers (an integer remainder by zero is `0`), `~` and `>>>`. Shifts of 8- and 16-bit integers run on 32-bit values, as in JavaScript, and wrap the result to the operand's width; `>>>` reads the operand as unsigned in its width |
 | Numeric conversion | `i8()` … `u64()`, `usize()`, `f32()`, `f64()` from the std module, with Rust `as` semantics on the argument's static type: a float truncates toward zero and saturates, an integer wraps. `usize()` converts as `u32` on every target |
 | Float math | `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `exp`, `log`, `atan2`, `pow`, `hypot` on `f32` or `f64` |
-| Arrays | `fill(n, v)` allocates; `push`, `pop`, `insert`, `removeAt`, `clear`, `truncate`, `fillRange`, `copyRange`, `fillRect` and `copyRect` change an assignable array place. `copyRange` takes numeric, boolean or enum elements, clips its window to both arrays and, given a sixth argument, leaves target elements in place where the source holds that value. `fillRect` and `copyRect` do the same for each row of a rectangle in arrays laid out in rows (`start + row * stride`); `copyRect` reads every source row before writing. `fillRange` and `fillRect` store a copy of the value in each element, a negative `truncate` length empties the array, and `pop` or `removeAt` outside the array returns the element type's default. `Cap` arrays do not admit `push`, `insert`, `removeAt` or `truncate`. Loops that only read `rows[i][j]` with `i` fixed borrow the row once |
+| Arrays | `fill(n, v)` allocates; `push`, `pop`, `insert`, `removeAt`, `clear`, `truncate`, `fillRange`, `copyRange`, `fillRect` and `copyRect` change an assignable array place. `copyRange` takes numeric, boolean or enum elements, clips its window to both arrays and, given a sixth argument, leaves target elements in place where the source holds that value. `fillRect` and `copyRect` do the same for each row of a rectangle in arrays laid out in rows (`start + row * stride`); `copyRect` reads every source row before writing. `fillRange` and `fillRect` store a copy of the value in each element, a negative `truncate` length empties the array, and `pop` or `removeAt` outside the array returns the element type's default. `Cap` arrays do not admit `push`, `insert`, `removeAt` or `truncate`; a value stored into `Cap` elements, such as a string pushed onto a `Cap<string, 3>[]`, is bounded like any other `Cap` write. Loops that only read `rows[i][j]` with `i` fixed borrow the row once |
 | Constants | A module constant holding an array literal of numbers, booleans or enums is stored once as a static; `embedBytes("./file.bin")` embeds a file as a `u8[]` static |
 | Strings | `codePoints(s)` and `fromCodePoint(n)` |
 | Parameter defaults | `function f(a: i32, b: i32 = -1)`: a call may omit trailing parameters whose defaults are literals or constants. Awaiting an async function passes every argument |
