@@ -68,6 +68,12 @@ class ModelRust {
     return rp(this.name(id));
   }
   constantName(id: number) { return `CONST_${id}`; }
+  /** include_bytes! takes the resolved path as a string literal. */
+  embeddedPath(e: ModelExpr): RustExpr {
+    const path = e.kind === "builtin" ? e.args[0] : undefined;
+    if (path?.kind !== "literal" || typeof path.value !== "string") throw new Error("embedBytes requires a resolved path literal");
+    return rl(path.value);
+  }
   /** A Rust place for a stored value, read without cloning the whole value. */
   borrow(e: ModelExpr): RustExpr | undefined {
     if (e.kind === "local" || e.kind === "field" || e.kind === "signal") return this.storage(e.id);
@@ -336,7 +342,11 @@ class ModelRust {
       case "invoke": return this.invoke(e.callee, e.args);
       case "builtin": return this.builtin(e, capacity, capacityName);
       case "lambda": return { kind: "closure", params: e.params.map(p => rn(this.name(p.id))), body: block(this.expressionBody(e.body, e.type)) };
-      case "sequence": return rc({ kind: "closure", params: [], body: block(this.expressionBody(e.body, e.type), this.expr(e.value, capacity, capacityName)) });
+      case "sequence": {
+        // A body without return is a plain block; a return needs the closure boundary.
+        const value = block(this.expressionBody(e.body, e.type), this.expr(e.value, capacity, capacityName));
+        return this.returns(e.body) ? rc({ kind: "closure", params: [], body: value }) : value;
+      }
       case "constant": return rm(rp(this.constantName(e.id)), "to_vec");
       case "mutate": return this.mutate(e);
     }
@@ -361,7 +371,7 @@ class ModelRust {
     }
     if (e.name === "len") return rc(rp("microts", "builtins", "len"), ref(this.borrow(e.args[0]!) ?? args[0]!));
     if ((MICROTS_NUMERIC_TYPES as readonly string[]).includes(e.name)) return cast(this.unwrapScalar(args[0]!, e.args[0]!.type), rt(e.name));
-    if (e.name === "embedBytes") return rm({ kind: "macro", name: ["include_bytes"], args: [args[0]!] }, "to_vec");
+    if (e.name === "embedBytes") return rm({ kind: "macro", name: ["include_bytes"], args: [this.embeddedPath(e)] }, "to_vec");
     if (e.name === "codePoints") return rc(rp("microts", "builtins", "code_points"), ref(args[0]!));
     if (e.name === "fromCodePoint") return rc(rp("microts", "builtins", "from_code_point"), args[0]!);
     if (["map", "filter", "find", "some"].includes(e.name)) {
@@ -383,6 +393,20 @@ class ModelRust {
     return this.wrapScalar(rc(rp("microts", "builtins", e.name), ...args.map((arg, index) => this.unwrapScalar(arg, e.args[index]!.type))), e.type);
   }
   statements(body: ModelBlock): RustStatement[] { return body.stmts.flatMap(stmt => this.statement(stmt)); }
+  /** Whether a block contains a return outside nested lambdas. */
+  returns(body: ModelBlock): boolean {
+    let found = false;
+    const walk = (value: unknown): void => {
+      if (found || !value || typeof value !== "object") return;
+      if (Array.isArray(value)) { value.forEach(walk); return; }
+      const node = value as { kind?: string };
+      if (node.kind === "return") { found = true; return; }
+      if (node.kind === "lambda") return;
+      for (const [key, child] of Object.entries(value)) if (!["loc", "ledger", "type"].includes(key)) walk(child);
+    };
+    walk(body);
+    return found;
+  }
   /**
    * Lowers a loop body. A loop reached by break or continue gets a label; when code
    * follows the body in each iteration, continue leaves a labeled block around the body.
@@ -853,7 +877,7 @@ class ModelRust {
     if (this.view) this.items.push({ kind: "use", path: ["super"], names: ["*"] }); else this.emitTypes();
     this.codecs();
     for (const [id, value] of this.constants) {
-      if (value.kind === "builtin" && value.name === "embedBytes") this.items.push({ kind: "static", name: this.constantName(id), type: rr({ kind: "slice", element: rt("u8") }, false, "static"), value: { kind: "macro", name: ["include_bytes"], args: [this.expr(value.args[0]!)] } });
+      if (value.kind === "builtin" && value.name === "embedBytes") this.items.push({ kind: "static", name: this.constantName(id), type: rr({ kind: "slice", element: rt("u8") }, false, "static"), value: { kind: "macro", name: ["include_bytes"], args: [this.embeddedPath(value)] } });
       else if (value.kind === "array" && value.type.kind === "array") this.items.push({ kind: "static", name: this.constantName(id), type: { kind: "array", element: this.type(value.type.element), length: value.items.length }, value: { kind: "array", elements: value.items.map(item => this.expr(item)) } });
       else throw new Error(`Model constant ${id} cannot be stored as a static`);
     }

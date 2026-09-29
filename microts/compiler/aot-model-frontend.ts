@@ -459,7 +459,7 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
     const types: Record<MutationName, (AotType | undefined)[]> = { push: [element], pop: [], insert: [I32, element], removeAt: [I32], clear: [], truncate: [I32], fillRange: [I32, I32, element], copyRange: [I32, target.type, I32, I32] };
     const args = node.arguments.slice(1).map((argument, index) => {
       const value = expr(argument, types[name][index], into);
-      if (types[name][index]?.kind === "array") { if (value.type.kind !== "array" || !sameType(value.type.element, element)) error(argument, "copyRange source must have the target's element type"); return value; }
+      if (name === "copyRange" && index === 1) { if (value.type.kind !== "array" || !sameType(value.type.element, element)) error(argument, "copyRange source must have the target's element type"); return value; }
       return temp(check(value, types[name][index], argument), into);
     });
     const result = name === "pop" || name === "removeAt" ? element : VOID;
