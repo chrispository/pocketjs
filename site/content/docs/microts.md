@@ -526,14 +526,15 @@ harness builds reference and optimized versions of the same app and compares
 their behavior:
 
 ```sh
-bun microts/compiler/cli.ts check sensor-list --report specialization
-bun microts/compiler/specialization-harness.ts sensor-list --release
+bun microts/compiler/cli.ts check settings --report specialization
+bun microts/compiler/specialization-harness.ts settings tests/tapes/settings-specialization.tape.json --release
 ```
 
-`sensor-list` displays simulated sensor values and needs no sensor hardware.
-Its input tape exercises value changes, conditional content, keyed-list
-changes, focus, scrolling and viewport changes. The harness compares draw
-words, pixels, tree identity, input targets, commands and lifecycle behavior.
+`settings` displays sound and vibration toggles, brightness levels from 1 to 5,
+and four color themes. Its input tape exercises those controls, focus
+navigation, hit tests, conditional theme indicators and viewport changes.
+The harness compares draw words, pixels, tree identity, input targets,
+commands and lifecycle behavior.
 See [Compare native builds](/docs/microts-reference/#compare-native-builds) for
 tape fields, fixture configuration and generated reports.
 

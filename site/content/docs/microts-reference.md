@@ -362,7 +362,7 @@ compiles and packages the application.
 with:
 
 ```sh
-bun microts/compiler/cli.ts build sensor-list
+bun microts/compiler/cli.ts build settings
 ```
 
 These optimizations preserve View IR, Model IR, source admission, and guest
@@ -418,8 +418,8 @@ does not enable specialization hashing or region registration.
 Inspect source proofs without generating native code:
 
 ```sh
-bun microts/compiler/cli.ts check sensor-list --report specialization
-bun microts/compiler/cli.ts check sensor-list --report specialization --strict --json
+bun microts/compiler/cli.ts check settings --report specialization
+bun microts/compiler/cli.ts check settings --report specialization --strict --json
 ```
 
 The report classifies a value by when its inputs can change:
@@ -613,13 +613,13 @@ is not called by normal application frames or enabled by specialization.
 The native differential harness builds reference and optimized versions of an
 application, supplies shared font assets, and runs the same input recording
 through both programs. The harness selects the comparison modes.
-The `sensor-list` fixture uses simulated sensors and needs no device hardware.
+The `settings` application has sound and vibration toggles, brightness levels
+from 1 to 5, and four color themes.
 From the repository root:
 
 ```sh
-bun microts/compiler/specialization-harness.ts sensor-list
-bun microts/compiler/specialization-harness.ts sensor-list --release
-bun microts/compiler/specialization-harness.ts sensor-list path/to/tape.json --release
+bun microts/compiler/specialization-harness.ts settings tests/tapes/settings-specialization.tape.json
+bun microts/compiler/specialization-harness.ts settings tests/tapes/settings-specialization.tape.json --release
 ```
 
 **Comparison includes complete DrawList words, pixel hashes, glyph-miss
@@ -667,11 +667,10 @@ cancelled results omit `value`. Animation values are `ended`, `replaced`, or
 `dropped`. A value payload of `{"$i32": 3}` preserves an i32 transport value;
 ordinary JSON numbers use the model's number transport representation.
 
-[`sensor-list/tape.json`](https://github.com/pocket-stack/pocketjs/blob/main/apps/sensor-list/tape.json)
-exercises empty text, numeric changes, keyed reorder and insertion/removal,
-conditional content, focus, scrolling, and viewport changes. START changes the
-first sensor value without changing the title or footer, for card-bounded
-damage comparison.
+[`settings-specialization.tape.json`](https://github.com/pocket-stack/pocketjs/blob/main/tests/tapes/settings-specialization.tape.json)
+exercises both toggles, the brightness range, all four themes, focus navigation,
+hit tests, and viewport changes. Theme selection mounts and unmounts its
+`Show` indicators, covering conditional layout changes.
 
 For custom fixtures,
 [`executeSpecialization`](https://github.com/pocket-stack/pocketjs/blob/main/microts/compiler/specialization-harness.ts)

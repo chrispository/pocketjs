@@ -6,48 +6,112 @@ import { buildAot } from "../microts/compiler/aot-build.ts";
 import { registerAnimationTheme } from "../framework/compiler/animation.ts";
 import { DRAW_OP, PROP } from "../contracts/spec/spec.ts";
 
-test("sensor-list preserves words, keyed logical identities, focus, hits and commands", async () => {
-  const result = await executeSpecialization("sensor-list");
-  expect(result.reference.frames).toHaveLength(16);
+interface ObservedNode {
+  node: string;
+  text: string;
+  children: ObservedNode[];
+}
+
+function treeNodes(value: unknown): ObservedNode[] {
+  const node = value as ObservedNode;
+  return [node, ...node.children.flatMap(treeNodes)];
+}
+
+const sum = (mode: Awaited<ReturnType<typeof executeSpecialization>>["reference"], field: string) =>
+  mode.frames.reduce((total, frame) => total + (frame.counters[field] ?? 0), 0);
+
+test("settings preserves rendering, focus, hits and animation commands through real interactions", async () => {
+  // The first 100 frames replay settings-main's existing golden tape. Later
+  // frames cycle every brightness level and theme, then resize the viewport.
+  const tape = JSON.parse(await readFile(resolve("tests/tapes/settings-specialization.tape.json"), "utf8"));
+  const result = await executeSpecialization("settings", { tape });
+  expect(result.reference.frames).toHaveLength(tape.frames.length);
   expect(result.reference.frames[0]!.words.length).toBeGreaterThan(0);
-  const sum = (mode: typeof result.reference, field: string) => mode.frames.reduce((n, frame) => n + (frame.counters[field] ?? 0), 0);
+  const frames = result.specialized.frames;
+  const controls = frames[0]!.hits;
+  expect(controls).toHaveLength(7);
+  expect(new Set(controls).size).toBe(7);
+  expect(controls).not.toContain("$none");
+  for (const [frame, control] of [[4, 0], [16, 1], [28, 2], [40, 3], [44, 4], [48, 5]] as const) {
+    expect(frames[frame]!.focused).toBe(controls[control]);
+  }
+  for (const frame of [26, 90, 196, 200]) expect(frames[frame]!.hits).toEqual(controls);
+
+  expect(frames[10]!.commands).toEqual([expect.objectContaining({ kind: "animate", prop: PROP.translateX, to: 0.5, dur: 160 })]);
+  expect(frames[22]!.commands).toEqual([expect.objectContaining({ kind: "animate", prop: PROP.translateX, to: 15.5, dur: 160 })]);
+  for (const frame of [10, 22]) {
+    // Switching changes paint and transforms; no layout inputs change.
+    expect(frames[frame]!.counters.layout_passes).toBe(0);
+    expect(frames[frame]!.counters.shaping_calls).toBe(0);
+    expect(frames[frame]!.counters.damage_full_redraws).toBe(0);
+    expect(frames[frame]!.counters.damage_area).toBeGreaterThan(0);
+    expect(frames[frame]!.counters.damage_area).toBeLessThan(480 * 272);
+  }
+  expect(treeNodes(frames[0]!.tree).some(node => node.text === "3/5")).toBe(true);
+  for (const [frame, level] of [[34, 4], [100, 5], [112, 1], [124, 2], [136, 3], [198, 4]] as const) {
+    const observation = frames[frame]!;
+    expect(treeNodes(observation.tree).some(node => node.text === `${level}/5`)).toBe(true);
+    expect(observation.commands).toHaveLength(3);
+    expect(observation.commands[0]).toMatchObject({ kind: "animate", prop: PROP.scaleX, to: level / 5, dur: 150 });
+    expect(observation.commands[2]).toMatchObject({ kind: "animate", prop: PROP.translateX, to: level * 24 - 8, dur: 150 });
+    expect(observation.counters.set_text).toBe(1);
+    expect(observation.counters.shaping_calls).toBe(1);
+  }
+  const selectedSwatches = (frame: number) => treeNodes(frames[frame]!.tree)
+    .filter(node => controls.slice(3).includes(node.node) && node.children.length > 0)
+    .map(node => node.node);
+  expect(selectedSwatches(0)).toEqual([controls[3]!]);
+  for (const [frame, control] of [[54, 5], [148, 3], [160, 4], [172, 6], [184, 5]] as const) {
+    expect(selectedSwatches(frame)).toEqual([controls[control]!]);
+    expect(frames[frame]!.counters.nodes_created).toBe(1);
+    expect(frames[frame]!.counters.nodes_destroyed).toBe(1);
+    expect(frames[frame]!.counters.structure_syncs).toBe(1);
+    expect(frames[frame]!.counters.shaping_calls).toBe(0);
+  }
+  for (const frame of [196, 200]) {
+    expect(frames[frame]!.counters.layout_passes).toBe(1);
+    expect(frames[frame]!.counters.damage_full_redraws).toBe(1);
+  }
+  for (const frame of [202, 204]) expect(frames[frame]!.counters.memo_evaluations).toBeGreaterThan(0);
+  // Show swaps and viewport changes synchronize the existing general tree.
+  expect(sum(result.reference, "structure_rebuilds")).toBe(1);
+  expect(sum(result.specialized, "structure_rebuilds")).toBe(1);
   expect(sum(result.specialized, "memo_evaluations")).toBeLessThan(sum(result.reference, "memo_evaluations"));
   expect(sum(result.specialized, "update_at")).toBeLessThan(sum(result.reference, "update_at"));
-  // The general solver now retains text measurements across topology edits.
-  // Separate region solvers still rebuild at boundary changes/deoptimization,
-  // so total shaping work no longer has a strict on < off ordering.
-  expect(sum(result.reference, "structure_rebuilds")).toBe(1);
-  expect(result.reference.frames[4]!.counters.shaping_calls).toBe(0);
-  expect(result.reference.frames[9]!.counters.shaping_calls).toBeLessThan(result.reference.frames[0]!.counters.shaping_calls!);
-  expect(sum(result.specialized, "generated_words")).toBeLessThan(sum(result.reference, "generated_words"));
-  expect(sum(result.specialized, "region_cache_hits")).toBeGreaterThan(0);
-  expect(result.specialized.frames[0]!.counters.draw_segments).toBeGreaterThan(0);
-  expect(result.specialized.frames.at(-1)!.counters.draw_segments).toBe(0);
-  // Scroll rebuilds the containing list solver, without rebuilding or shaping
-  // any of its three fixed card regions.
-  expect(result.specialized.frames[4]!.counters.structure_rebuilds).toBe(1);
-  expect(result.specialized.frames[4]!.counters.shaping_calls).toBe(0);
-  // Removing and inserting a card keeps damage local after the first frame.
-  for (const frame of [7, 9]) {
-    expect(result.specialized.frames[frame]!.counters.damage_full_redraws).toBe(0);
-    expect(result.specialized.frames[frame]!.counters.damage_area).toBeLessThan(480 * 272);
-  }
   expect(result.generatedLines.on).toBeGreaterThan(0);
 }, 180_000);
 
-test("one sensor value update damages only its fixed card", async () => {
-  const result = await executeSpecialization("sensor-list", { tape: [{}, { buttons: 8 }, {}] });
-  const frame = result.specialized.frames[1]!.counters;
-  expect(frame.set_text).toBe(1);
-  // Array replacement reconciles the list; card contents remain isolated.
-  expect(frame.structure_rebuilds).toBeLessThanOrEqual(1);
-  expect(frame.shaping_calls).toBe(0);
-  expect(frame.damage_full_redraws).toBe(0);
-  expect(frame.damage_area).toBeGreaterThan(0);
-  expect(frame.damage_min_x).toBeGreaterThanOrEqual(16);
-  expect(frame.damage_min_y).toBeGreaterThanOrEqual(52);
-  expect(frame.damage_max_x).toBeLessThanOrEqual(464);
-  expect(frame.damage_max_y).toBeLessThanOrEqual(116);
+test("keyed reorders and empty text preserve identities without rebuilding the general solver", async () => {
+  const directory = await animationFixture("keyed-layout", `import {createSignal} from "solid-js";
+import {map,len,type i32} from "@pocketjs/framework/solid/std";
+export interface Row { id:i32; label:string }
+export const [rows,setRows]=createSignal<Row[]>([{id:1,label:"A"},{id:2,label:"B"},{id:3,label:"C"}]);
+export const [status,setStatus]=createSignal("");
+export function reverse():void{setRows(map(rows(),(row,index)=>rows()[len(rows())-index-1]));}
+export function toggleText():void{setStatus(status()===""?"ready":"");}
+export function resize():void{if(len(rows())===3)setRows([rows()[0],rows()[1]]);else setRows([rows()[0],rows()[1],{id:4,label:"D"}]);}`, `import {View,Text,For,ActionHandler} from "@pocketjs/framework/solid/components";
+import {BTN} from "@pocketjs/framework/input"; import {rows,status,reverse,toggleText,resize} from "./App";
+export default function App(){return <View class="flex-col"><ActionHandler button={BTN.CROSS} onPress={reverse}/><ActionHandler button={BTN.SQUARE} onPress={toggleText}/><ActionHandler button={BTN.CIRCLE} onPress={resize}/>
+<Text>{status()}</Text><For each={rows()} by={(row)=>row.id}>{(row)=><View class="flex-row"><Text>{row().label}</Text></View>}</For></View>}`);
+  const result = await executeSpecialization(directory, { tape: [{}, {buttons:16384}, {}, {buttons:32768}, {}, {buttons:8192}, {}, {buttons:8192}, {}, {buttons:32768}, {}] });
+  const frameNodes = (index: number) => treeNodes(result.specialized.frames[index]!.tree);
+  const labels = (index: number) => frameNodes(index).map(node => node.text).filter(text => /^[A-D]$/.test(text));
+  expect(labels(0)).toEqual(["A", "B", "C"]);
+  expect(labels(1)).toEqual(["C", "B", "A"]);
+  expect(labels(5)).toEqual(["C", "B"]);
+  expect(labels(7)).toEqual(["C", "B", "D"]);
+  for (const label of ["B", "C"]) {
+    const identity = frameNodes(0).find(node => node.text === label)!.node;
+    for (const frame of [1, 3, 5, 7, 9]) expect(frameNodes(frame).find(node => node.text === label)!.node).toBe(identity);
+  }
+  expect(frameNodes(3).some(node => node.text === "ready")).toBe(true);
+  expect(frameNodes(9).some(node => node.text === "ready")).toBe(false);
+  expect(result.specialized.frames[1]!.counters.nodes_created).toBe(0);
+  expect(result.specialized.frames[1]!.counters.nodes_destroyed).toBe(0);
+  expect(result.specialized.frames[5]!.counters.nodes_destroyed).toBeGreaterThan(0);
+  expect(result.specialized.frames[7]!.counters.nodes_created).toBeGreaterThan(0);
+  expect(sum(result.reference, "structure_rebuilds")).toBe(1);
+  expect(sum(result.specialized, "structure_rebuilds")).toBe(1);
 }, 180_000);
 
 test("private field bindings remain live across input, set_props and invalidate", async () => {
@@ -86,17 +150,17 @@ impl AppViewModel for Model { fn press(&mut self) { self.count += 1; } fn count(
 test("specialization CLI keeps IR identical and rejects invalid option values", async () => {
   const run = resolve(".pocket-build/validation/microts-specialization", `cli-${process.pid}`);
   for (const specialize of ["off", "on"] as const) {
-    await buildAot("sensor-list", { specialize, outDir: resolve(run, specialize), ir: resolve(run, `${specialize}.json`), format: false });
+    await buildAot("settings", { specialize, outDir: resolve(run, specialize), ir: resolve(run, `${specialize}.json`), format: false });
   }
   expect(await readFile(resolve(run, "on.json"), "utf8")).toBe(await readFile(resolve(run, "off.json"), "utf8"));
   expect(await readFile(resolve(run, "on.model.json"), "utf8")).toBe(await readFile(resolve(run, "off.model.json"), "utf8"));
-  const report = Bun.spawn([process.execPath, "microts/compiler/cli.ts", "check", "sensor-list", "--report", "specialization", "--json", "--strict"], { stdout: "pipe", stderr: "pipe" });
+  const report = Bun.spawn([process.execPath, "microts/compiler/cli.ts", "check", "settings", "--report", "specialization", "--json", "--strict"], { stdout: "pipe", stderr: "pipe" });
   const [status, stdout, stderr] = await Promise.all([report.exited, new Response(report.stdout).text(), new Response(report.stderr).text()]);
   expect(status, stderr).toBe(0);
   expect(JSON.parse(stdout).version).toBe(1);
   expect(stderr).toMatch(/warning VS10[12]/);
   for (const args of [["--specialize", "sometimes"], ["--specialize"], ["--report", "unknown"]]) {
-    const result = Bun.spawnSync([process.execPath, "microts/compiler/cli.ts", "check", "sensor-list", ...args], { stdout: "pipe", stderr: "pipe" });
+    const result = Bun.spawnSync([process.execPath, "microts/compiler/cli.ts", "check", "settings", ...args], { stdout: "pipe", stderr: "pipe" });
     expect(result.exitCode).not.toBe(0);
   }
 }, 30_000);

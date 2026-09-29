@@ -29,8 +29,8 @@ function freeze(value: unknown): void {
   Object.freeze(value);
 }
 
-test.each(["solid-aot-lab", "vue-sfc-lab", "sensor-list"])("%s report is read-only and every Frame conclusion has a reason", app => {
-  const p = analyzeAot(resolve(`apps/${app}/app.${app === "solid-aot-lab" ? "tsx" : "vue"}`), { strict: true });
+test.each(["solid-aot-lab", "vue-sfc-lab", "settings"])("%s report is read-only and every Frame conclusion has a reason", app => {
+  const p = analyzeAot(resolve(`apps/${app}/app.${app === "vue-sfc-lab" ? "vue" : "tsx"}`), { strict: true });
   const before = JSON.stringify(p), modelBefore = JSON.stringify(p.model);
   freeze(p);
   const report = analyzeAotSpecialization(p);
@@ -49,8 +49,8 @@ test.each(["solid-aot-lab", "vue-sfc-lab", "sensor-list"])("%s report is read-on
   expect(JSON.stringify(analyzeAotSpecialization(p))).toBe(JSON.stringify(report));
   expect(formatAotSpecializationReport(report)).toContain("deps=");
   expect(report.diagnostics.every(d => d.severity === "warning")).toBe(true);
-  if (app === "sensor-list") {
-    expect(nodes(report).find(n => n.debugName === "SensorCard")!.region!.eligible).toBe(true);
+  if (app === "settings") {
+    expect(nodes(report).some(n => n.debugName === "SettingsScreen")).toBe(true);
     expect(nodes(report).some(n => n.bindings.some(b => b.name === "text" && b.stage === "Frame"))).toBe(true);
   }
 });
