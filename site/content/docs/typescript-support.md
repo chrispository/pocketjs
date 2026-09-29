@@ -402,10 +402,12 @@ Model IR to JavaScript, and the reference interpreter executes it.
 | Arrays | `fill(n, v)` allocates; `push`, `pop`, `insert`, `removeAt`, `clear`, `truncate`, `fillRange` and `copyRange` change an assignable array place. `copyRange` takes numeric, boolean or enum elements and clips its window to both arrays |
 | Constants | A module constant holding an array literal of scalars is stored once as a static; `embedBytes("./file.bin")` embeds a file as a `u8[]` static |
 | Strings | `codePoints(s)` and `fromCodePoint(n)` |
+| Parameter defaults | `function f(a: i32, b: i32 = -1)`: a call may omit trailing parameters whose defaults are literals or constants |
 | Imports | `tsconfig.json` `paths` next to the entry map non-relative specifiers to local modules |
 
-Array element and member reads of fields, locals and constants index the
-stored value in place; they do not copy the array.
+Element and member reads of fields, locals and constants, including nested
+arrays such as `rows[i][j]`, index the stored value in place; they do not copy
+the array.
 
 ## Current implementation limits
 

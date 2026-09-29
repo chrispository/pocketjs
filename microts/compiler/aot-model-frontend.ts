@@ -154,8 +154,21 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
     const b: ModelBinder = { id: nextId++, name: `_arg${generated++}`, type: value.type, owned: true, loc: value.loc };
     into.push({ kind: "let", binder: b, init: !primitive(value.type) ? { ...value, kind: "copy", value } : value, loc: value.loc }); return { kind: "local", id: b.id, type: b.type, ledger: emptyLedger(), loc: value.loc };
   }
+  /** Constant default values of function parameters, by parameter binder id. */
+  const parameterDefaults = new Map<number, ts.Expression>();
   function args(nodes: readonly ts.Expression[], into: ModelStmt[], parameters?: ModelBinder[]): ModelExpr[] {
-    return nodes.map((n, i) => temp(expr(n, parameters?.[i]?.type, into), into));
+    const values = nodes.map((n, i) => temp(expr(n, parameters?.[i]?.type, into), into));
+    for (const parameter of parameters?.slice(nodes.length) ?? []) {
+      const initializer = parameterDefaults.get(parameter.id)!;
+      const value = isolated(initializer, parameter.type);
+      if (!constantExpression(value)) error(initializer, "parameter defaults require literals or constants");
+      values.push(value);
+    }
+    return values;
+  }
+  function checkArity(node: ts.CallExpression, fn: ModelFunction, name: string): void {
+    const required = fn.params.filter(parameter => !parameterDefaults.has(parameter.id)).length;
+    if (node.arguments.length < required || node.arguments.length > fn.params.length) error(node, `function ${name} expects ${required === fn.params.length ? required : `${required} to ${fn.params.length}`} arguments`);
   }
   function isolated(node: ts.Expression, expected?: AotType): ModelExpr { const statements: ModelStmt[] = [], value = expr(node, expected, statements); return statements.length ? make(node, { kind: "sequence", body: { stmts: statements }, value }, value.type) : value; }
   function loadConstant(b: Binding): ModelExpr {
@@ -306,7 +319,7 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
       if (b?.kind === "function") {
         ensureFunction(b.id);
         if (b.fn!.async) error(node, "an async call must start a task as a statement or be awaited");
-        if (node.arguments.length !== b.fn!.params.length) error(node, `function ${b.name} expects ${b.fn!.params.length} arguments`);
+        checkArity(node, b.fn!, b.name);
         return check(make(node, { kind: "invoke", callee: b.id, args: args(node.arguments, into, b.fn!.params) }, b.fn!.returns), expected, node);
       }
       if (name === "copy") { if (node.arguments.length !== 1) error(node, "copy requires one argument"); const value = expr(node.arguments[0]!, expected, into); return make(node, { kind: "copy", value }, value.type); }
@@ -636,6 +649,7 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
         }
         if (b?.kind === "function") {
           ensureFunction(b.id);
+          checkArity(e, b.fn!, b.name);
           into.push({ kind: b.fn!.async ? "start" : "call", ...(b.fn!.async ? { task: b.id } : { callee: b.id }), args: args(e.arguments, into, b.fn!.params), loc: loc(node) } as ModelStmt); return;
         }
         if (name === "cancel") {
@@ -771,7 +785,15 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
         if (model.kind === "state" && asyncFn(node)) error(node, "state module functions are synchronous; declare tasks in the root model");
         const fn: ModelFunction = { id: nextId++, name: node.name.text, exported: exported(node), async: asyncFn(node), params: [], returns: type(node.type, `${typeName(node.name.text)}Result`) ?? VOID, body: { stmts: [] }, ledger: emptyLedger(), loc: loc(node) };
         const b = register(node.name, { id: fn.id, name: fn.name, kind: "function", type: fn.returns, node, module: model, fn });
-        fn.params = node.parameters.map(p => { if (!ts.isIdentifier(p.name) || p.dotDotDotToken || p.questionToken || p.initializer) error(p, "function parameters require simple names and fixed arity"); const t = type(p.type, p.name.text); if (!t) error(p, "function parameters require a contract type annotation"); return bindLocal(p.name, t); });
+        fn.params = node.parameters.map(p => {
+          if (!ts.isIdentifier(p.name) || p.dotDotDotToken || p.questionToken) error(p, "function parameters require simple names; optional parameters need a constant default");
+          const t = type(p.type, p.name.text); if (!t) error(p, "function parameters require a contract type annotation");
+          const binder = bindLocal(p.name, t);
+          if (p.initializer) parameterDefaults.set(binder.id, p.initializer);
+          return binder;
+        });
+        const firstDefault = fn.params.findIndex(parameter => parameterDefaults.has(parameter.id));
+        if (firstDefault >= 0 && fn.params.slice(firstDefault).some(parameter => !parameterDefaults.has(parameter.id))) error(node, "parameters after a defaulted parameter need defaults");
         model.functions.push(fn); functionsByBinding.set(fn.id, { b, node, state: "new" }); continue;
       }
       if (ts.isVariableStatement(node)) {

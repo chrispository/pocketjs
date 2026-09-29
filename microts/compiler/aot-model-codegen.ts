@@ -78,6 +78,29 @@ class ModelRust {
     }
     return undefined;
   }
+  /**
+   * An element read below a stored root, as an `Option<&T>` chain: index operands
+   * are bound to locals in source order, then each step borrows from the last.
+   */
+  readChain(e: ModelExpr): { statements: RustStatement[]; value: RustExpr } | undefined {
+    const steps: ModelExpr[] = [];
+    let root = e;
+    while (root.kind === "index" || root.kind === "member" && root.object.type.kind === "named" && this.declarations.get(root.object.type.name)?.kind === "struct") { steps.unshift(root); root = root.object; }
+    const place = this.borrow(root);
+    if (!place || !steps.length || steps[0]!.kind !== "index") return undefined;
+    const statements: RustStatement[] = [];
+    let value: RustExpr = place, optional = false;
+    for (const step of steps) {
+      if (step.kind === "member") { value = optional ? rm(value, "map", { kind: "closure", params: [rn("value")], body: ref(rf(rp("value"), step.name)) }) : rf(value, step.name); continue; }
+      if (step.kind !== "index") continue;
+      const index = `index_${this.serial++}`;
+      statements.push(let_(index, this.expr(step.index)));
+      const get = (object: RustExpr) => rm(object, "get", cast(rp(index), rt("usize")));
+      value = optional ? rm(value, "and_then", { kind: "closure", params: [rn("value")], body: get(rp("value")) }) : get(value);
+      optional = true;
+    }
+    return { statements, value };
+  }
   /** Type of a place below its root, following element and member steps. */
   stepType(type: AotType, step: ModelPathStep): AotType {
     if (step.kind === "index") return type.kind === "array" ? type.element : type;
@@ -251,10 +274,10 @@ class ModelRust {
         return extract(object);
       }
       case "index": {
-        const place = this.borrow(e.object);
-        if (place) {
-          const index = `index_${this.serial++}`, value = rm(rm(place, "get", cast(rp(index), rt("usize"))), "cloned");
-          return block([let_(index, this.expr(e.index))], e.type.kind === "option" ? value : rm(value, "unwrap_or_else", { kind: "closure", params: [], body: this.defaultValue(e.type) }));
+        const chain = this.readChain(e);
+        if (chain) {
+          const value = rm(chain.value, "cloned");
+          return block(chain.statements, e.type.kind === "option" ? value : rm(value, "unwrap_or_else", { kind: "closure", params: [], body: this.defaultValue(e.type) }));
         }
         const value = rm(rm(this.expr(e.object), "get", cast(this.expr(e.index), rt("usize"))), "cloned");
         return e.type.kind === "option" ? value : rm(value, "unwrap_or_else", { kind: "closure", params: [], body: this.defaultValue(e.type) });
