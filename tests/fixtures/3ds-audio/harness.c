@@ -223,6 +223,26 @@ size_t audio_test_active_waves(unsigned channel) {
   return active;
 }
 
+static bool audio_test_has_stereo_sample(unsigned channel, int16_t left, int16_t right) {
+  bool found = false;
+  lock_channel((int)channel);
+  AudioTestChannel *state = &audio_test_channels[channel];
+  for (size_t wave_index = 0; wave_index < state->wave_count && !found; wave_index += 1) {
+    ndspWaveBuf *wave = state->waves[wave_index];
+    uint8_t status = atomic_load(&wave->status);
+    if (status != NDSP_WBUF_QUEUED && status != NDSP_WBUF_PLAYING) continue;
+    const int16_t *samples = wave->data_vaddr;
+    for (uint32_t frame = 0; frame < wave->nsamples; frame += 1) {
+      if (samples[frame * 2] == left && samples[frame * 2 + 1] == right) {
+        found = true;
+        break;
+      }
+    }
+  }
+  unlock_channel((int)channel);
+  return found;
+}
+
 void DSP_FlushDataCache(const void *address, size_t size) {
   (void)address;
   (void)size;
@@ -368,6 +388,26 @@ static int test_partial_write_credits_and_end(void) {
   CHECK(audio_mod_poll(event, sizeof(event)));
   CHECK(strncmp(event, "{\"t\":\"credit\"", 13) == 0);
   CHECK(strstr(event, "\"free\":2048}") != NULL);
+
+  int16_t *wrapped_pcm = malloc(4096u * 2u * sizeof(int16_t));
+  CHECK(wrapped_pcm != NULL);
+  for (size_t frame = 0; frame < 4096; frame += 1) {
+    wrapped_pcm[frame * 2] = 0x5a5a;
+    wrapped_pcm[frame * 2 + 1] = 0x2d2d;
+  }
+  CHECK(audio_mod_write_pcm(handle, (const uint8_t *)wrapped_pcm,
+                            4096u * 2u * sizeof(int16_t)) == 2048);
+  CHECK(!audio_mod_poll(event, sizeof(event)));
+
+  bool wrapped_audio_played = false;
+  for (unsigned i = 0; i < 12 && !wrapped_audio_played; i += 1) {
+    audio_test_drain(1);
+    CHECK(wait_for_active(1, 2) == 0);
+    wrapped_audio_played = audio_test_has_stereo_sample(1, 0x5a5a, 0x2d2d);
+  }
+  CHECK(wrapped_audio_played);
+  free(wrapped_pcm);
+
   audio_mod_stop(handle);
   CHECK(audio_test_active_waves(1) == 0);
   memset(pcm, 0x2a, 1024u * 4u);
@@ -422,6 +462,6 @@ int main(void) {
   if (test_initialization_cleanup() != 0) return 1;
   if (test_pcm_contract_and_lifecycle() != 0) return 1;
   if (test_partial_write_credits_and_end() != 0) return 1;
-  puts("3DS PCM formats, ring credits, events, handles and cleanup verified");
+  puts("3DS PCM formats, partial writes, ring wrap, credits, events, handles and cleanup verified");
   return 0;
 }

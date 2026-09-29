@@ -30,7 +30,7 @@ test("3DS PCM module preserves the audio contract across its NDSP adapter", () =
     const run = Bun.spawnSync([binary], { timeout: 10000 });
     expect(run.exitCode, run.stderr.toString()).toBe(0);
     expect(run.stdout.toString()).toContain(
-      "3DS PCM formats, ring credits, events, handles and cleanup verified",
+      "3DS PCM formats, partial writes, ring wrap, credits, events, handles and cleanup verified",
     );
   } finally {
     rmSync(scratch, { recursive: true, force: true });
