@@ -162,7 +162,8 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
       const initializer = parameterDefaults.get(parameter.id)!;
       const value = isolated(initializer, parameter.type);
       if (!constantExpression(value)) error(initializer, "parameter defaults require literals or constants");
-      values.push(value);
+      // Call arguments are atomic; a default array or struct literal is bound first.
+      values.push(temp(value, into));
     }
     return values;
   }
