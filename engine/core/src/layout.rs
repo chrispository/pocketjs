@@ -622,9 +622,23 @@ fn sync_node(
         // both ancestor chains. Calling it for an unchanged list loses cache.
         if !eng.taffy.children(handle).is_ok_and(|old| old == projected) {
             let _ = eng.taffy.set_children(handle, &projected);
+            invalidate_ancestors(&mut eng.taffy, handle);
         }
     }
     Some(handle)
+}
+
+/// Taffy stops dirty propagation at a node whose cache is already empty and
+/// assumes its ancestors are dirty. Hidden layout breaks that assumption: it
+/// empties every cache below a display:none node but keeps that node's own
+/// result, so a node attached below it would keep its previous layout.
+/// Marking each ancestor reaches the display:none node.
+fn invalidate_ancestors(taffy: &mut TaffyTree<MeasureCtx>, node: taffy::NodeId) {
+    let mut current = taffy.parent(node);
+    while let Some(ancestor) = current {
+        let _ = taffy.mark_dirty(ancestor);
+        current = taffy.parent(ancestor);
+    }
 }
 
 fn in_transform(tree: &Tree, styles: &StyleTable, slot: u32, root_id: i32) -> bool {

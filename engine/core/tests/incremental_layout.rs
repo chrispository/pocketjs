@@ -323,6 +323,32 @@ fn auxiliary_moves_resizes_and_font_replacement_update_both_solvers() {
     pair.check("auxiliary subtree becomes visible");
 }
 
+#[test]
+fn nodes_moved_into_a_hidden_subtree_take_the_hidden_layout() {
+    // Taffy lays out display:none subtrees without caching them, so a retained
+    // node attached there must still invalidate the hidden ancestor.
+    let mut pair = Pair::new();
+    let (hidden, inner, moving) = pair.edit(|ui| {
+        let hidden = view(ui, spec::ROOT_ID, None, None);
+        ui.set_prop(hidden, DISPLAY, spec::Display::None as u8 as f64);
+        let inner = view(ui, hidden, None, None);
+        (hidden, inner, view(ui, spec::ROOT_ID, Some(20.0), Some(20.0)))
+    });
+    pair.check("visible sibling");
+    pair.edit(|ui| ui.remove_child(spec::ROOT_ID, moving));
+    pair.check("detached");
+    pair.edit(|ui| ui.insert_before(inner, moving, 0));
+    pair.check("reattached inside the hidden subtree");
+    assert_eq!(pair.live.layout_of(moving), Some((0.0, 0.0, 0.0, 0.0)));
+    pair.edit(|ui| ui.insert_before(spec::ROOT_ID, moving, 0));
+    pair.check("moved back out");
+    assert_eq!(pair.width(moving), 20.0);
+    pair.edit(|ui| ui.insert_before(inner, moving, 0));
+    pair.check("moved into the hidden subtree in one flush");
+    pair.edit(|ui| ui.set_prop(hidden, DISPLAY, spec::Display::Flex as u8 as f64));
+    pair.check("hidden subtree shown");
+}
+
 /// A native text provider: `char_width` per character, 12 px lines.
 fn measure(char_width: f32) -> pocketjs_core::text::MeasureFn {
     Box::new(move |text, _, _, line_height| {
