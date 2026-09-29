@@ -62,7 +62,16 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
     if (visiting.has(file)) return; visiting.add(file); reachable.push(file);
     const ast = ts.createSourceFile(file, source(file), ts.ScriptTarget.Latest, true);
     if (file.endsWith(".d.ts")) fail(location(file, source(file)), "compiled models require a .ts module with bodies, not .d.ts");
-    for (const node of ast.statements) if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && localImport(node.moduleSpecifier.text, file) && !node.importClause?.isTypeOnly && !(node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings) && node.importClause.namedBindings.elements.every(item => item.isTypeOnly))) collect(resolveImport(node.moduleSpecifier.text, file, node));
+    for (const node of ast.statements) if (valueImport(node, file)) collect(resolveImport(node.moduleSpecifier.text, file, node));
+  }
+  /** A namespace re-export, `export * as name from "./module"`. */
+  function namespaceExport(node: ts.Node): node is ts.ExportDeclaration & { moduleSpecifier: ts.StringLiteral } {
+    return ts.isExportDeclaration(node) && !node.isTypeOnly && !!node.exportClause && ts.isNamespaceExport(node.exportClause) && !!node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier);
+  }
+  /** An import of values from a local module, or a namespace re-export of one: the module is part of the model. */
+  function valueImport(node: ts.Node, file: string): node is (ts.ImportDeclaration | ts.ExportDeclaration) & { moduleSpecifier: ts.StringLiteral } {
+    if (namespaceExport(node)) return localImport(node.moduleSpecifier.text, file);
+    return ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && localImport(node.moduleSpecifier.text, file) && !node.importClause?.isTypeOnly && !(node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings) && node.importClause.namedBindings.elements.every(item => item.isTypeOnly));
   }
   collect(entry); for (const factory of options.factories ?? []) collect(resolve(factory));
   const componentNames = options.componentNames ?? [options.name ?? "App", ...(options.factories ?? []).map(file => typeName(basename(file, ".ts")))];
@@ -84,7 +93,12 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
   const loc = (node: ts.Node) => env.locationOf(node);
   function error(node: ts.Node, message: string): never { return fail(loc(node), message); }
   function symbol(node: ts.Node, follow = false): ts.Symbol | undefined { let s = checker.getSymbolAtLocation(node); if (follow && s && s.flags & ts.SymbolFlags.Alias) s = checker.getAliasedSymbol(s); return s; }
-  function binding(node: ts.Node): Binding | undefined { const s = ts.isIdentifier(node) && ts.isShorthandPropertyAssignment(node.parent) ? checker.getShorthandAssignmentValueSymbol(node.parent) : symbol(node); return s && (bindings.get(s) ?? bindings.get(s.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(s) : s)); }
+  /** Whether an expression names a module: `ns` of `import * as ns` or `export * as ns`, or a member namespace of one. */
+  function isNamespace(node: ts.Node): boolean {
+    const s = symbol(ts.isPropertyAccessExpression(node) ? node.name : node, true);
+    return !!s && !!(s.flags & ts.SymbolFlags.ValueModule) && !!s.declarations?.some(ts.isSourceFile);
+  }
+  function binding(node: ts.Node): Binding | undefined { if (ts.isPropertyAccessExpression(node) && isNamespace(node.expression)) return binding(node.name); const s = ts.isIdentifier(node) && ts.isShorthandPropertyAssignment(node.parent) ? checker.getShorthandAssignmentValueSymbol(node.parent) : symbol(node); return s && (bindings.get(s) ?? bindings.get(s.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(s) : s)); }
   function imported(node: ts.Node): Imported | undefined { const s = symbol(node); return s && imports.get(s); }
   function register(node: ts.Node, value: Binding): Binding { const s = symbol(node); if (!s) error(node, `unresolved binder ${node.getText()}`); bindings.set(s, value); return value; }
   function named(node: ts.Node): string | undefined { return imported(node)?.name; }
@@ -244,6 +258,8 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
       if (["signal", "memo"].includes(b.kind)) error(node, isVueBinding(b) ? "Vue refs and computed values must be read through .value" : "Solid accessors must be called to read their values");
       return check(read(b, node), expected, node);
     }
+    if (ts.isPropertyAccessExpression(node) && isNamespace(node.expression)) return expr(node.name, expected, into);
+    if (isNamespace(node)) error(node, "a namespace names its members; it is not a value");
     if (ts.isPropertyAccessExpression(node)) {
       const b = binding(node.expression);
       if (b?.kind === "memo") ensureMemo(b.id);
@@ -427,6 +443,7 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
   /** An assignable place: a local or field root followed by element and member steps. Index operands are evaluated once, into temporaries. */
   function place(node: ts.Expression, into: ModelStmt[]): Place {
     if (ts.isParenthesizedExpression(node)) return place(node.expression, into);
+    if (ts.isPropertyAccessExpression(node) && isNamespace(node.expression)) return place(node.name, into);
     if (ts.isIdentifier(node)) {
       const b = binding(node);
       if (!b || b.kind !== "local" && b.kind !== "field") error(node, "assignment target must be a local, a private field, or an element or member of one");
@@ -754,7 +771,11 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
         const source = node.moduleSpecifier.text, clause = node.importClause;
         if (!clause) error(node, "side-effect imports are outside the model subset");
         if (clause.isTypeOnly) continue;
-        if (clause.name || clause.namedBindings && !ts.isNamedImports(clause.namedBindings)) error(node, "model imports require named bindings");
+        if (clause.name) error(node, "model imports require named bindings");
+        if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+          if (!localImport(source, file)) error(node, "namespace imports require a local module");
+          continue;
+        }
         for (const specifier of (clause.namedBindings as ts.NamedImports | undefined)?.elements ?? []) {
           if (specifier.isTypeOnly) continue;
           const name = specifier.propertyName?.text ?? specifier.name.text, s = symbol(specifier.name)!;
@@ -781,7 +802,7 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
   // A module with private `let` fields, or one importing such a module, is a state module:
   // its fields and functions belong to the root region.
   const stateCall = (node: ts.Expression) => ts.isCallExpression(node) && ["createSignal", "ref", "createMemo", "computed", "createNodeRef", "createContext"].includes(callName(node.expression) ?? "");
-  const moduleImports = (model: ModelModule) => env.program.getSourceFile(model.file)!.statements.flatMap(node => ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && localImport(node.moduleSpecifier.text, model.file) && !node.importClause?.isTypeOnly && !(node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings) && node.importClause.namedBindings.elements.every(item => item.isTypeOnly)) ? [moduleByFile.get(resolveImport(node.moduleSpecifier.text, model.file, node))] : []);
+  const moduleImports = (model: ModelModule) => env.program.getSourceFile(model.file)!.statements.flatMap(node => valueImport(node, model.file) ? [moduleByFile.get(resolveImport(node.moduleSpecifier.text, model.file, node))] : []);
   for (const model of result.modules) if (model.kind === "pure" && env.program.getSourceFile(model.file)!.statements.some(node => ts.isVariableStatement(node) && !(node.declarationList.flags & ts.NodeFlags.Const) && node.declarationList.declarations.some(d => !d.initializer || !stateCall(d.initializer)))) model.kind = "state";
   for (let changed = true; changed;) {
     changed = false;
@@ -796,7 +817,8 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
     current = model;
     for (const node of statements) {
       if (ts.isImportDeclaration(node) || ts.isTypeAliasDeclaration(node) || ts.isInterfaceDeclaration(node) || ts.isEnumDeclaration(node) || ts.isEmptyStatement(node)) continue;
-      if (ts.isExportDeclaration(node)) error(node, "re-exports are outside the model subset");
+      if (namespaceExport(node) || ts.isExportDeclaration(node) && (node.isTypeOnly || !!node.exportClause && ts.isNamedExports(node.exportClause) && node.exportClause.elements.every(item => item.isTypeOnly))) continue;
+      if (ts.isExportDeclaration(node)) error(node, "re-exports other than export * as name are outside the model subset");
       if (ts.isReturnStatement(node) && model.kind === "factory" && !outer) continue;
       if (ts.isFunctionDeclaration(node)) {
         if (factoryDeclarations.get(model) === node) continue;
@@ -868,7 +890,7 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
   }
   for (const model of result.modules) {
     current = model;
-    for (const node of env.program.getSourceFile(model.file)!.statements) if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && localImport(node.moduleSpecifier.text, model.file) && !node.importClause?.isTypeOnly) {
+    for (const node of env.program.getSourceFile(model.file)!.statements) if (valueImport(node, model.file)) {
       const other = moduleByFile.get(resolveImport(node.moduleSpecifier.text, model.file, node));
       if (other && other.kind !== "pure" && !(other.kind === "state" && (model.kind === "root" || model.kind === "state"))) error(node, "cross-model imports of signals, memos and functions are outside the subset; use props, events or context");
     }

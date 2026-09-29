@@ -222,9 +222,10 @@ when absence matters. Compound-element limitations are listed below.
 | `createNodeRef()` | Mount-owned animation target slot |
 | `createContext()` | Solid view context key |
 
-Model modules reject classes, namespaces, generators, default exports,
-re-exports, side-effect imports, namespace/default value imports and dynamic
-`import()`. A view component's required default export is a separate frontend
+Model modules reject classes, `namespace` declarations, generators, default
+exports, re-exports other than `export * as name` (and type-only ones),
+side-effect imports, default value imports, namespace imports of framework
+modules and dynamic `import()`. A view component's required default export is a separate frontend
 rule. Model top-level executable statements are limited to admitted reactive
 registration forms; arbitrary startup calls belong in model methods/hooks.
 
@@ -404,6 +405,7 @@ Model IR to JavaScript, and the reference interpreter executes it.
 | Strings | `codePoints(s)` and `fromCodePoint(n)` |
 | Parameter defaults | `function f(a: i32, b: i32 = -1)`: a call may omit trailing parameters whose defaults are literals or constants |
 | Imports | `tsconfig.json` `paths` next to the entry map non-relative specifiers to local modules |
+| Namespaces | `export * as name from "./module"` and `import * as name from "./module"` name a local module; `name.member` reads, assigns or calls its exports, nested namespaces included. Namespaces resolve at compile time and cannot be stored or passed |
 
 Element and member reads of fields, locals and constants, including nested
 arrays such as `rows[i][j]`, index the stored value in place; they do not copy
