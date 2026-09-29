@@ -996,7 +996,7 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
       // TypeScript adds undefined to the inferred type when the end of the body is reachable.
       const signature = checker.getSignatureFromDeclaration(item.node), inferred = signature && checker.getReturnTypeOfSignature(signature);
       const undefinedIn = (t: ts.Type): boolean => !!(t.flags & ts.TypeFlags.Undefined) || t.isUnion() && t.types.some(undefinedIn);
-      if (currentFunction.returns.kind !== "void" && currentFunction.returns.kind !== "option" && inferred && undefinedIn(inferred)) error(item.node, "a function that returns a value must return one on every path; add a final return or annotate the return type");
+      if (!["void", "undefined", "option"].includes(currentFunction.returns.kind) && inferred && undefinedIn(inferred)) error(item.node, "a function that returns a value must return one on every path; add a final return or annotate the return type");
       item.b.type = currentFunction.returns;
     }
     current = beforeModule; currentFunction = beforeFunction; callbackReturnType = beforeReturnType; item.state = "done";

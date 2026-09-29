@@ -56,6 +56,10 @@ function pick(k: I32) {
 function maybe(flag: boolean): I32 | undefined {
   if (flag) return 5;
 }
+function blank(): undefined {}
+function nothing(flag: boolean) {
+  if (flag) return undefined;
+}
 let target: I32[] = [0];
 function replace(): I32[] {
   target = [5];
@@ -169,6 +173,9 @@ export function press(): void {
   push(out, i32(next()));
   // An optional return type falls off the end as undefined.
   push(out, (maybe(false) ?? 9) + (maybe(true) ?? 9));
+  blank();
+  nothing(false);
+  nothing(true);
   // Writes read their target place after their value and arguments.
   copyRange(target, 0, replace(), 0, 1);
   grid[0][0] = regrid();

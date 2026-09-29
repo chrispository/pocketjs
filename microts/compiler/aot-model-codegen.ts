@@ -813,10 +813,10 @@ class ModelRust {
     for (const parameter of func.params) this.binders.set(parameter.id, parameter);
     const depth = this.current.kind === "pure" ? rp("depth") : field("depth");
     const body = this.statements(func.body);
-    // Falling off the end returns undefined, which is None for an optional return type. For
-    // other return types TypeScript has found the end unreachable, and a body whose end Rust
-    // cannot see as unreachable ends in unreachable!().
-    const tail: RustExpr | undefined = func.returns.kind === "void" || this.diverges(func.body) ? undefined : func.returns.kind === "option" ? rp("None") : { kind: "macro", name: ["unreachable"], args: [rl(`${func.name} returns on every path`)] };
+    // Falling off the end returns undefined, which is None for an undefined or optional return
+    // type. For other return types TypeScript has found the end unreachable, and a body whose
+    // end Rust cannot see as unreachable ends in unreachable!().
+    const tail: RustExpr | undefined = func.returns.kind === "void" || this.diverges(func.body) ? undefined : func.returns.kind === "option" || func.returns.kind === "undefined" ? rp("None") : { kind: "macro", name: ["unreachable"], args: [rl(`${func.name} returns on every path`)] };
     const expression: RustExpr = rc({ kind: "closure", params: [], body: block(body, tail) });
     // Parameters the body assigns or changes in place are declared mut.
     const assigned = this.assignedIds(func.body);
