@@ -183,6 +183,12 @@ class ModelRust {
     }
     try { return [...statements, ...lower()]; } finally { for (const key of keys) this.rows.delete(key); }
   }
+  /** Type of the place a target denotes. */
+  placeType(target: ModelTarget): AotType {
+    const root = target.kind === "path" ? target.root.id : "id" in target ? target.id : target.owner;
+    const steps: ModelPathStep[] = target.kind === "path" ? target.steps : target.kind === "element" ? [{ kind: "index", index: target.index }] : target.kind === "member" ? [{ kind: "member", name: target.name }] : [];
+    return steps.reduce((type, step) => this.stepType(type, step), this.rootType(root));
+  }
   /** Type of a place below its root, following element and member steps. */
   stepType(type: AotType, step: ModelPathStep): AotType {
     if (step.kind === "index") return type.kind === "array" ? type.element : type;
@@ -212,9 +218,12 @@ class ModelRust {
   mutate(e: Extract<ModelExpr, { kind: "mutate" }>): RustExpr {
     // copyRange and copyRect read a source array, borrowed below rather than evaluated here.
     const sourceIndex = e.op === "copyRange" ? 1 : e.op === "copyRect" ? 2 : -1;
+    // A value stored into the array takes the element type, such as a Cap string.
+    const valueIndex = ({ push: 0, insert: 1, fillRange: 2, fillRect: 4 } as Partial<Record<typeof e.op, number>>)[e.op];
+    const targetType = this.placeType(e.target), element = targetType.kind === "array" ? targetType.element : undefined;
     const statements: RustStatement[] = [], args = e.args.map((arg, index) => {
       if (index === sourceIndex) return undefined;
-      const name = `arg_${this.serial++}`; statements.push(let_(name, this.expr(arg))); return rp(name);
+      const name = `arg_${this.serial++}`; statements.push(let_(name, index === valueIndex && element ? this.coerce(arg, element) : this.expr(arg))); return rp(name);
     });
     const root = e.target.kind === "path" ? e.target.root.id : "id" in e.target ? e.target.id : e.target.owner;
     let source: RustExpr | undefined;
@@ -708,6 +717,10 @@ class ModelRust {
       case "forOf": return this.withRows([s], () => { const body = this.loopBody(s.loop, s.body, false); return [{ kind: "for", pattern: rn(this.name(s.binder.id)), iterable: this.expr(s.source), label: body.label, body: rb([work("LoopIteration"), ...body.statements]) }]; });
       case "while": return this.withRows([s], () => {
         const body = this.loopBody(s.loop, s.body, !!s.update || !!s.post), update = s.update ? this.statements(s.update) : [];
+        // A loop on the literal true is a Rust loop, which ends only by break or return, so
+        // a function that returns from inside it type-checks as TypeScript's does.
+        const forever = s.condition.kind === "literal" && s.condition.value === true;
+        if (forever) return [{ kind: "loop", label: body.label, body: rb([work("LoopIteration"), ...body.statements, ...update]) }];
         if (s.post) return [{ kind: "loop", label: body.label, body: rb([work("LoopIteration"), ...body.statements, condition({ kind: "unary", operator: "!", expr: this.expr(s.condition) }, [{ kind: "break" }])]) }];
         return [{ kind: "while", condition: this.expr(s.condition), label: body.label, body: rb([work("LoopIteration"), ...body.statements, ...update]) }];
       });
@@ -945,7 +958,9 @@ class ModelRust {
       traitMethods.push(fn("resume", [receiver(true), param("ready", rr(rt("Ready"))), param("_cmds", rr(rt("Vec", rt("Cmd")), true))], rb([re(rm(self, "prepare_resume", rp("ready")))])));
       traitMethods.push(fn("cancel_tasks", [receiver(true), param("cmds", rr(rt("Vec", rt("Cmd")), true))], rb([re(rm(field("commands"), "drain_to", rp("cmds")))])));
     }
+    const taken = new Set([...methods, ...traitMethods].map(method => method.name));
     for (const f of module.fields) if (f.hostName) {
+      for (const name of [f.hostName, `${f.hostName}_mut`]) if (taken.has(name)) throw new Error(`The state accessor ${name} of field ${f.name} has the name of a model method; rename the field or its file`);
       const type = this.type(f.type, false, f.capacity);
       methods.push(fn(f.hostName, [receiver()], rb([], ref(field(this.name(f.id)))), rr(type), true));
       methods.push(fn(`${f.hostName}_mut`, [receiver(true)], rb([], ref(field(this.name(f.id)), true)), rr(type, true), true));

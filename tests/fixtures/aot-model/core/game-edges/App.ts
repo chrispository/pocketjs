@@ -1,11 +1,14 @@
 import { createSignal } from "solid-js";
-import { copyRange, copyRect, embedBytes, fill, fillRange, fillRect, idiv, imod, len, push, removeAt, truncate, f32, f64, i8, i16, i32, i64, u8, u16, usize, type i32 as I32, type u8 as U8, type i8 as I8, type u16 as U16 } from "@pocketjs/framework/solid/std";
+import { copyRange, copyRect, embedBytes, fill, fillRange, fillRect, idiv, imod, len, pow, push, removeAt, truncate, f32, f64, i8, i16, i32, i64, u8, u16, usize, type Cap, type f64 as F64, type i32 as I32, type u8 as U8, type i8 as I8, type u16 as U16 } from "@pocketjs/framework/solid/std";
 type Id = I32 & { readonly __newtype?: "Id" };
 type Name = string & { readonly __newtype?: "Name" };
+type Byte = I8 & { readonly __newtype?: "Byte" };
 interface P { x: I32 }
 interface E { tag?: I32 }
 interface Bank { data: I32[] }
 export const [result, setResult] = createSignal<I32[]>([]);
+const TABLE: Cap<I32[], 4> = [1, 2];
+export const [table, setTable] = createSignal<Cap<I32[], 4>>(TABLE);
 const NAMES: Name[] = ["ab", "c"];
 const BYTES: U8[] = embedBytes("./bytes.bin");
 let rows: I32[][] = [[1, 2, 3]];
@@ -13,6 +16,26 @@ let bank: Bank = { data: [1, 2, 3, 4, 5, 6] };
 function bump(): I32 {
   rows[0] = [7, 8, 9];
   return 1;
+}
+let counter = 1;
+function next(): F64 {
+  counter += 1;
+  return f64(counter);
+}
+let src: I32[] = [1, 2, 3];
+function swap(): I32 {
+  src = [9, 9, 9];
+  return 3;
+}
+function five() {
+  while (true) {
+    return 5;
+  }
+}
+function six() {
+  do {
+    return 6;
+  } while (true);
 }
 export function press(): void {
   const out: I32[] = [];
@@ -78,5 +101,26 @@ export function press(): void {
   }
   push(out, count);
   for (const byte of BYTES) push(out, i32(byte));
+  // Built-in arguments run in source order: the source is read before swap() replaces it.
+  push(out, i32(pow(next(), next() + 1.0)));
+  push(out, idiv(i32(next()) * 10, i32(next()) + 1));
+  const dst: I32[] = [0, 0, 0];
+  copyRange(dst, 0, src, 0, swap());
+  for (const v of dst) push(out, v);
+  // Cap constants seed Cap signals; values stored into Cap string arrays are bounded.
+  push(out, len(table()));
+  const words: Cap<string, 3>[] = [];
+  const word: string = "ab";
+  push(words, word);
+  fillRange(words, 0, 1, word);
+  push(out, len(words[0]));
+  // Newtypes compute in their base type.
+  const byte: Byte = -1 as Byte;
+  push(out, i32(byte >>> 1));
+  type Big = I32 & { readonly __newtype?: "Big" };
+  const big: Big = 2147483647 as Big;
+  push(out, i32(big * big));
+  // Returns inside loops set the inferred return type.
+  push(out, five() + six());
   setResult(out);
 }

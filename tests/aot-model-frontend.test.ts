@@ -68,6 +68,11 @@ createEffect(() => { count(); untrack(() => { console.log(tick()); }); });`).mod
     const state = 'import type { i32 } from "@pocketjs/framework/solid/std"; export let x: i32 = 0; export function bump(): void { x += 1; }';
     expect(() => analyze('import { bump } from "./a/state"; import { bump as other } from "./b/state"; export function go() { bump(); other(); }', { "a/state.ts": state, "b/state.ts": state })).toThrow("share the host accessor state_x");
   });
+  test("rejects a root export with the name of a state accessor", () => {
+    const state = 'import type { i32 } from "@pocketjs/framework/solid/std"; export let x: i32 = 0; export function bump(): void { x += 1; }';
+    expect(() => analyze('import { bump } from "./state"; export function state_x(): void { bump(); }', { "state.ts": state })).toThrow("the state accessor state_x of field x");
+    expect(() => analyze('import { bump } from "./state"; export const [state_x_mut, setIt] = createSignal(0); export function go(): void { bump(); }', { "state.ts": state })).toThrow("the state accessor state_x_mut");
+  });
   test("rejects state from another model region", () => {
     expect(() => analyze('import { n } from "./other"; export function read() { return n(); }', { "other.ts": 'import { createSignal } from "solid-js"; export const [n, setN] = createSignal(0);' })).toThrow("model");
   });

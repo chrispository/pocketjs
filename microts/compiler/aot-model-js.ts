@@ -72,8 +72,10 @@ export function generateModelJavaScript(program: ModelProgram, module: ModelModu
       case "cast": return numeric(expr(e.value), e.type);
       case "unary": return numeric(`(${e.operator}${expr(e.operand)})`, e.type);
       case "binary": {
-        if (e.operator === "*" && e.type.kind === "number" && e.type.name === "i32") return `Math.imul(${expr(e.left)}, ${expr(e.right)})`;
-        if (e.operator === ">>>" && e.type.kind === "number" && ["i8", "u8", "i16", "u16"].includes(e.type.name)) return numeric(`((${expr(e.left)} & ${e.type.name.endsWith("8") ? 255 : 65535}) >>> ${expr(e.right)})`, e.type);
+        // Newtypes compute in their base number type.
+        const base = baseType(e.type);
+        if (e.operator === "*" && base.kind === "number" && base.name === "i32") return numeric(`Math.imul(${expr(e.left)}, ${expr(e.right)})`, e.type);
+        if (e.operator === ">>>" && base.kind === "number" && ["i8", "u8", "i16", "u16"].includes(base.name)) return numeric(`((${expr(e.left)} & ${base.name.endsWith("8") ? 255 : 65535}) >>> ${expr(e.right)})`, e.type);
         // An integer remainder by zero is zero, as in Rust.
         if (e.operator === "%" && integer(e.type)) return numeric(`${stdAlias}.imod(${expr(e.left)}, ${expr(e.right)})`, e.type);
         return numeric(`(${expr(e.left)} ${e.operator} ${expr(e.right)})`, e.type);

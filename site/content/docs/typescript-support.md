@@ -253,9 +253,9 @@ top-level `let` fields with the modules that import them.
 Each parameter has a simple name and an explicit supported type. Parameter
 destructuring, optional and rest parameters, function type parameters and
 generators are not supported; a trailing parameter may default to a literal or
-constant (see the [native game subset](#native-game-subset)). Return types can be inferred from supported
-return statements; annotate public signatures and functions containing
-`switch`, whose return inference is incomplete.
+constant (see the [native game subset](#native-game-subset)). Return types are
+inferred from the body's return statements, including those in loops and
+`switch` cases; annotate public signatures.
 
 Functions of a model can read and update that model. Imported pure functions
 cannot read model state, emit host commands or start tasks. Calls evaluate

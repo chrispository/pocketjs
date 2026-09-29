@@ -33,8 +33,7 @@ function copyWindow(target: Value[], to: number, source: Value[], from: number, 
   count = Math.min(count, source.length - from, target.length - to);
   if (count <= 0) return;
   const values = source.slice(from, from + count);
-  if (skip.length) values.forEach((value: Value, i: number) => { if (value !== skip[0]) target[to + i] = value; });
-  else target.splice(to, count, ...values);
+  for (let i = 0; i < count; i++) if (!skip.length || values[i] !== skip[0]) target[to + i] = values[i];
 }
 type Env = Map<number, Value>;
 interface Cell { value: Value; version: number; changed: boolean; seen?: number[] }
@@ -272,11 +271,15 @@ export class ModelInterpreter {
     if(type.kind==="named"){const declaration=this.program.types.find(value=>value.name===type.name);return declaration?.kind==="enum"||declaration?.kind==="newtype"&&this.primitiveType(declaration.base);}
     return ["number","boolean","string","undefined","void","style"].includes(type.kind);
   }
+  /** The number type a newtype wraps, or the type itself. */
+  private base(type: AotType): AotType {
+    const declaration = type.kind === "named" ? this.program.types.find(declaration => declaration.name === type.name) : undefined;
+    return declaration?.kind === "newtype" && declaration.unit !== "Color" ? this.base(declaration.base) : type;
+  }
   /** Whether a value of this type is a float (f32 or f64, or a newtype of one). */
   private float(type: AotType): boolean {
-    const declaration = type.kind === "named" ? this.program.types.find(declaration => declaration.name === type.name) : undefined;
-    if (declaration?.kind === "newtype") return declaration.unit !== "Color" && this.float(declaration.base);
-    return type.kind === "number" && type.name.startsWith("f");
+    const base = this.base(type);
+    return base.kind === "number" && base.name.startsWith("f");
   }
   numeric(value: Value, type: AotType): Value {
     if(type.kind==="option")return value===undefined?undefined:this.numeric(value,type.value);
@@ -332,11 +335,11 @@ export class ModelInterpreter {
         const right = evaluate(expr.right); let value: Value;
         switch (expr.operator) {
           case "+": value = left + right; break; case "-": value = left - right; break;
-          case "*": value = expr.type.kind === "number" && expr.type.name === "i32" ? Math.imul(left, right) : left * right; break;
+          case "*": { const base = this.base(expr.type); value = base.kind === "number" && base.name === "i32" ? Math.imul(left, right) : left * right; break; }
           case "/": value = left / right; break; case "%": value = right === 0 && !this.float(expr.type) ? 0 : left % right; break; case "**": value = left ** right; break;
           case "===": return left === right; case "!==": return left !== right; case "<": return left < right; case "<=": return left <= right; case ">": return left > right; case ">=": return left >= right;
           case "&": value = left & right; break; case "|": value = left | right; break; case "^": value = left ^ right; break; case "<<": value = left << right; break; case ">>": value = left >> right; break;
-          case ">>>": { const bits = expr.type.kind === "number" ? ({ i8: 8, u8: 8, i16: 16, u16: 16 } as Record<string, number>)[expr.type.name] : undefined; value = (bits ? left & (2 ** bits - 1) : left) >>> right; break; }
+          case ">>>": { const base = this.base(expr.type), bits = base.kind === "number" ? ({ i8: 8, u8: 8, i16: 16, u16: 16 } as Record<string, number>)[base.name] : undefined; value = (bits ? left & (2 ** bits - 1) : left) >>> right; break; }
           default: throw new Error(`Unsupported Model IR operator ${expr.operator}`);
         }
         return this.numeric(value, expr.type);

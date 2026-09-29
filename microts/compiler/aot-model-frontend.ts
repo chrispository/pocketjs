@@ -170,6 +170,34 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
     const b: ModelBinder = { id: nextId++, name: `_arg${generated++}`, type: value.type, owned: true, loc: value.loc };
     into.push({ kind: "let", binder: b, init: !primitive(value.type) ? { ...value, kind: "copy", value } : value, loc: value.loc }); return { kind: "local", id: b.id, type: b.type, ledger: emptyLedger(), loc: value.loc };
   }
+  /** Whether running a value or statements may call a function or change state. */
+  function effectful(value: unknown): boolean {
+    if (!value || typeof value !== "object") return false;
+    if (Array.isArray(value)) return value.some(effectful);
+    const kind = (value as { kind?: string }).kind;
+    if (kind === "lambda") return false;
+    if (kind && ["invoke", "call", "mutate", "sequence", "assign", "set", "start", "await", "external"].includes(kind)) return true;
+    return Object.entries(value).some(([key, child]) => key !== "loc" && key !== "ledger" && key !== "type" && effectful(child));
+  }
+  /**
+   * Lowers built-in call arguments in source order. Statements that lowering an
+   * argument emits run before the call; when they, or an earlier argument, have
+   * effects, the earlier arguments are bound to temporaries first.
+   */
+  function inOrder(count: number, lower: (index: number, into: ModelStmt[], earlier: ModelExpr[]) => ModelExpr, into: ModelStmt[]): ModelExpr[] {
+    const values: ModelExpr[] = [];
+    for (let index = 0; index < count; index++) {
+      const statements: ModelStmt[] = [];
+      const value = lower(index, statements, values);
+      if (statements.length) {
+        const later = effectful(statements);
+        for (let j = 0; j < values.length; j++) if (later || effectful(values[j])) values[j] = temp(values[j]!, into);
+      }
+      into.push(...statements);
+      values.push(value);
+    }
+    return values;
+  }
   /** Constant default values of function parameters, by parameter binder id. */
   const parameterDefaults = new Map<number, ts.Expression>();
   function args(nodes: readonly ts.Expression[], into: ModelStmt[], parameters?: ModelBinder[]): ModelExpr[] {
@@ -215,7 +243,8 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
   }
   /** Array constants of scalars are stored once as statics instead of being inlined at each use. */
   function staticConstant(value: ModelExpr): boolean {
-    if (value.type.kind !== "array" || !primitive(value.type.element) || scalarBase(value.type.element).kind === "string") return false;
+    // A Cap array keeps its bounded storage, so it is not a static slice.
+    if (value.type.kind !== "array" || value.type.capacity !== undefined || !primitive(value.type.element) || scalarBase(value.type.element).kind === "string") return false;
     return value.kind === "array" && value.items.every(item => item.kind === "literal" || item.kind === "unary" && item.operand.kind === "literal") || value.kind === "builtin" && value.name === "embedBytes";
   }
   function read(b: Binding, node: ts.Node): ModelExpr {
@@ -367,14 +396,18 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
         const arity = (MICROTS_MATH2_BUILTINS as readonly string[]).includes(name) ? 2 : 1;
         if (node.arguments.length !== arity) error(node, `${name}() takes ${arity} argument${arity > 1 ? "s" : ""}`);
         const floatHint = expected && numeric(expected)?.name.startsWith("f") ? numeric(expected) : undefined;
-        const first = expr(node.arguments[0]!, floatHint, into), type = numeric(first.type);
-        if (!type?.name.startsWith("f")) error(node.arguments[0]!, `${name}() requires f32 or f64; convert integers with f32() or f64()`);
-        const args = [first, ...node.arguments.slice(1).map(argument => expr(argument, type, into))];
-        return check(make(node, { kind: "builtin", name, args }, type), expected, node);
+        let type: ReturnType<typeof numeric>;
+        const args = inOrder(arity, (index, statements) => {
+          if (index > 0) return expr(node.arguments[index]!, type, statements);
+          const first = expr(node.arguments[0]!, floatHint, statements); type = numeric(first.type);
+          if (!type?.name.startsWith("f")) error(node.arguments[0]!, `${name}() requires f32 or f64; convert integers with f32() or f64()`);
+          return first;
+        }, into);
+        return check(make(node, { kind: "builtin", name, args }, type!), expected, node);
       }
       if (name === "fill") {
         if (node.arguments.length !== 2) error(node, "fill(count, value) takes two arguments");
-        const count = expr(node.arguments[0]!, I32, into), value = expr(node.arguments[1]!, expected?.kind === "array" ? expected.element : undefined, into);
+        const [count, value] = inOrder(2, (index, statements) => index === 0 ? expr(node.arguments[0]!, I32, statements) : expr(node.arguments[1]!, expected?.kind === "array" ? expected.element : undefined, statements), into) as [ModelExpr, ModelExpr];
         return check(make(node, { kind: "builtin", name, args: [count, value] }, { kind: "array", element: value.type }), expected, node);
       }
       if (name === "embedBytes") {
@@ -391,8 +424,7 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
       }
       if (name && mutationNames.has(name)) return mutation(node, name as MutationName, expected, into);
       if (name && stdNames.has(name) && !["frames", "after", "until", "join", "all", "any", "cancel"].includes(name)) {
-        const values: ModelExpr[] = [];
-        for (let i = 0; i < node.arguments.length; i++) {
+        const values = inOrder(node.arguments.length, (i, statements, values) => {
           const argument = node.arguments[i]!;
           if (ts.isArrowFunction(argument)) {
             if (!["map", "filter", "find", "some"].includes(name) || i !== 1 || ts.isBlock(argument.body)) error(argument, "collection callbacks require one inline expression");
@@ -400,9 +432,10 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
             const elementType = array.type.element;
             const params = argument.parameters.map((p, index) => { if (!ts.isIdentifier(p.name) || index > 1) error(p, "collection callback accepts element and index only"); return bindLocal(p.name, index === 0 ? elementType : I32, false); });
             const value = isolated(argument.body, name === "map" ? expected?.kind === "array" ? expected.element : undefined : BOOL);
-            values.push(make(argument, { kind: "lambda", params, body: { stmts: [{ kind: "return", value }] } }, value.type));
-          } else values.push(expr(argument, i > 0 && ["idiv", "imod", "min", "max", "clamp", "equals"].includes(name) ? values[0]?.type : undefined, into));
-        }
+            return make(argument, { kind: "lambda", params, body: { stmts: [{ kind: "return", value }] } }, value.type);
+          }
+          return expr(argument, i > 0 && ["idiv", "imod", "min", "max", "clamp", "equals"].includes(name) ? values[0]?.type : undefined, statements);
+        }, into);
         let out = expected ?? values[0]?.type ?? VOID;
         if (["len", "trunc", "floor", "ceil", "round"].includes(name)) out = I32;
         if (["equals", "some"].includes(name)) out = BOOL;
@@ -495,11 +528,12 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
     const element = target.type.element;
     if (copies && (!primitive(element) || scalarBase(element).kind === "string")) error(node.arguments[0]!, `${name} requires numeric, boolean or enum elements`);
     const types: Record<MutationName, (AotType | undefined)[]> = { push: [element], pop: [], insert: [I32, element], removeAt: [I32], clear: [], truncate: [I32], fillRange: [I32, I32, element], copyRange: [I32, target.type, I32, I32, element], fillRect: [I32, I32, I32, I32, element], copyRect: [I32, I32, target.type, I32, I32, I32, I32, element] };
-    const args = node.arguments.slice(1).map((argument, index) => {
-      const value = expr(argument, types[name][index], into);
+    // The source of a copy stays a place, read in place, unless a later argument's effects force it into a temporary.
+    const args = inOrder(node.arguments.length - 1, (index, statements) => {
+      const argument = node.arguments[index + 1]!, value = expr(argument, types[name][index], statements);
       if (copies && index === source) { if (value.type.kind !== "array" || !sameType(value.type.element, element)) error(argument, `${name} source must have the target's element type`); return value; }
-      return temp(check(value, types[name][index], argument), into);
-    });
+      return temp(check(value, types[name][index], argument), statements);
+    }, into);
     const result = name === "pop" || name === "removeAt" ? element : VOID;
     const value = make(node, { kind: "mutate", op: name, target: placeTarget(target), args }, result);
     if (target.root.kind === "local") for (const b of bindings.values()) if (b.id === target.root.id) { if (b.binder) delete b.binder.viewOf; delete b.arrayBound; }
@@ -937,7 +971,7 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
     currentFunction.body = lowerBlock(item.node.body!);
     if (!item.node.type) {
       const returns: AotType[] = [];
-      const collect = (block: ModelBlock): void => { for (const s of block.stmts) { if (s.kind === "return") returns.push(s.value?.type ?? VOID); else if (s.kind === "if") { collect(s.then); if (s.else) collect(s.else); } else if (["for", "forOf", "batch", "untrack"].includes(s.kind)) collect((s as { body: ModelBlock }).body); } };
+      const collect = (block: ModelBlock): void => { for (const s of block.stmts) { if (s.kind === "return") returns.push(s.value?.type ?? VOID); else if (s.kind === "if") { collect(s.then); if (s.else) collect(s.else); } else if (s.kind === "switch") { for (const c of s.cases) collect(c.body); } else if (["for", "forOf", "while", "batch", "untrack"].includes(s.kind)) collect((s as { body: ModelBlock }).body); } };
       collect(currentFunction.body); currentFunction.returns = returns[0] ?? VOID;
       if (!returns.every(t => sameType(t, currentFunction!.returns))) error(item.node, "function returns require one consistent contract type");
       item.b.type = currentFunction.returns;
@@ -1019,6 +1053,14 @@ export function analyzeModel(entry: string, options: AnalyzeModelOptions = {}): 
     rootModule.fields.push(...model.fields);
     rootModule.functions.push(...model.functions);
     rootModule.constants!.push(...(model.constants ?? []).map(constant => ({ ...constant, exported: false })));
+  }
+  // State accessors are inherent methods of the native model, which Rust resolves before
+  // the model's handlers and getters; a public name cannot be one of them.
+  if (rootModule) {
+    const publics = new Set([...rootModule.signals.flatMap(s => [s.name, ...(s.setter ? [s.setter] : [])]), ...rootModule.memos.map(m => m.name), ...rootModule.functions.filter(f => f.exported).map(f => f.name), ...rootModule.refs.map(r => r.name), ...(rootModule.constants ?? []).filter(c => c.exported).map(c => c.name)]);
+    for (const f of rootModule.fields) for (const name of f.hostName ? [f.hostName, `${f.hostName}_mut`] : []) {
+      if (publics.has(name)) fail(f.loc!, `the state accessor ${name} of field ${f.name} has the name of an export of the root model; rename one of them`);
+    }
   }
   result.modules = result.modules.filter(model => model.kind !== "state");
   lowerModelTasks(result);

@@ -19,6 +19,7 @@ export type Color = N.Color;
 export type StyleClass = string & { readonly __style?: true };
 export type Cap<T extends string | readonly unknown[], N extends number> = T & { readonly __capacity?: N };
 export { copy, equals } from "./model-reactive.ts";
+import { copy } from "./model-reactive.ts";
 export { capacity as __capacity } from "./model-reactive.ts";
 export { frames, after, until, join, all, any, cancel, type Join } from "./model-tasks.ts";
 import { parseMicroTsColor } from "../../contracts/spec/microts.ts";
@@ -139,7 +140,7 @@ function defaultLike<T>(sample: T | undefined): T {
   if (typeof sample === "string") return "" as T;
   return undefined as unknown as T;
 }
-export function fill<T>(count: i32, value: T): T[] { return Array.from({ length: Math.max(0, count) }, () => structuredClone(value)); }
+export function fill<T>(count: i32, value: T): T[] { return Array.from({ length: Math.max(0, count) }, () => copy(value)); }
 export function push<T>(target: T[], value: T): void { target.push(value); }
 export function pop<T>(target: T[]): T { return target.length ? target.pop()! : defaultLike<T>(undefined); }
 export function insert<T>(target: T[], index: i32, value: T): void { target.splice(Math.max(0, Math.min(index, target.length)), 0, value); }
@@ -149,8 +150,7 @@ export function clear<T>(target: T[]): void { target.length = 0; }
 export function truncate<T>(target: T[], length: i32): void { if (length < target.length) target.length = Math.max(0, length); }
 /** Each element in the window receives its own copy of `value`. */
 export function fillRange<T>(target: T[], start: i32, end: i32, value: T): void {
-  const own = typeof value === "object" && value !== null;
-  for (let i = Math.max(0, start); i < Math.min(end, target.length); i++) target[i] = own ? structuredClone(value) : value;
+  for (let i = Math.max(0, start); i < Math.min(end, target.length); i++) target[i] = copy(value);
 }
 export function copyRange<T>(target: T[], targetStart: i32, source: readonly T[], sourceStart: i32, count: i32, ...skip: [T?]): void {
   let n = count, from = sourceStart, to = targetStart;
@@ -158,9 +158,9 @@ export function copyRange<T>(target: T[], targetStart: i32, source: readonly T[]
   if (to < 0) { n += to; from -= to; to = 0; }
   n = Math.min(n, source.length - from, target.length - to);
   if (n <= 0) return;
+  // A copy of the window first, so a source that is the target reads its old elements.
   const values = source.slice(from, from + n);
-  if (skip.length) values.forEach((value, i) => { if (value !== skip[0]) target[to + i] = value; });
-  else target.splice(to, n, ...values);
+  for (let i = 0; i < n; i++) if (!skip.length || values[i] !== skip[0]) target[to + i] = values[i]!;
 }
 /** Row r of the rectangle is fillRange(target, start + r * stride, start + r * stride + width, value). */
 export function fillRect<T>(target: T[], start: i32, stride: i32, width: i32, height: i32, value: T): void {
