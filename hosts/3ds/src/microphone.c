@@ -1,7 +1,7 @@
 #include "microphone.h"
 
 #include <3ds.h>
-#include <3ds/linear.h>
+#include <3ds/allocator/linear.h>
 #include <3ds/services/mic.h>
 #include <stdlib.h>
 #include <string.h>
