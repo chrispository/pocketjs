@@ -7,10 +7,9 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
-#if __has_include(<netinet/tcp.h>)
 #include <netinet/tcp.h>
-#endif
 #include <stdio.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -56,6 +55,16 @@ static bool transfer(int fd, char *p, size_t n, bool send_data) {
   }
   return n == 0;
 }
+/* One send per record. libctru's TCP_NODELAY is an enum, not a macro, so
+ * an #ifdef guard compiled the option out and left Nagle on; the length
+ * header then went alone and the body waited for its ACK, ~200 ms per
+ * record over Wi-Fi. One buffer also keeps the pair in one segment. */
+static char tx[OFFLOAD_BYTES + 4];
+static bool send_record(int fd, const char *bytes, uint32_t length) {
+  uint32_t header = htonl(length);
+  memcpy(tx, &header, 4); memcpy(tx + 4, bytes, length);
+  return transfer(fd, tx, length + 4, true);
+}
 static void serve(void *unused) {
   (void)unused;
   char key[64];
@@ -79,10 +88,8 @@ static void serve(void *unused) {
     int fd = accept(listener, NULL, NULL);
     if (fd < 0) { svcSleepThread(10000000); continue; }
     fcntl(fd, F_SETFL, O_NONBLOCK);
-#ifdef TCP_NODELAY
     int no_delay = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &no_delay, sizeof no_delay);
-#endif
     char offered[64]; unsigned mismatch = 0;
     if (!transfer(fd, offered, sizeof offered, false)) { close(fd); continue; }
     for (unsigned i = 0; i < sizeof key; i++) mismatch |= key[i] ^ offered[i];
@@ -101,13 +108,11 @@ static void serve(void *unused) {
         int size = snprintf(metrics, sizeof metrics,
           "{\"v\":1,\"id\":0,\"method\":\"offload.metrics\",\"payload\":\"frames=%u maxCpuUs=%u over16ms=%u\"}",
           atomic_load(&measured_frames), atomic_load(&max_us), atomic_load(&over_budget));
-        uint32_t length = htonl((uint32_t)size);
-        alive = transfer(fd, (char *)&length, 4, true) && transfer(fd, metrics, size, true);
+        alive = send_record(fd, metrics, (uint32_t)size);
         if (!alive) break;
       }
       if (offload_pop(&outgoing, &record) && record.generation == (uint32_t)generation) {
-        uint32_t length = htonl(record.length);
-        alive = transfer(fd, (char *)&length, 4, true) && transfer(fd, record.bytes, record.length, true);
+        alive = send_record(fd, record.bytes, record.length);
       }
       if (ready) {
         if (offload_push(&incoming, rx + 4, (uint32_t)(want - 4), (uint32_t)generation)) { ready = false; have = 0; want = 4; }

@@ -236,11 +236,10 @@ static void start_connect(void) {
     enter_state(SVC_STATE_BACKOFF);
     return;
   }
-#ifdef TCP_NODELAY
-  /* Input lines are latency-bound; batching is already done frame-side. */
+  /* Input lines are latency-bound; batching is already done frame-side.
+   * No #ifdef: libctru declares TCP_NODELAY as an enum, not a macro. */
   int nodelay = 1;
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof nodelay);
-#endif
   tcp_fd = fd;
   int rc = connect(tcp_fd, (struct sockaddr *)&target, sizeof target);
   if (rc == 0) {
