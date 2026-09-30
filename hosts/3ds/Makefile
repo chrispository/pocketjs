@@ -26,6 +26,7 @@
 #   POCKETJS_SMDH_AUTHOR
 #   POCKETJS_SMDH_DESC
 #   POCKETJS_CAPTURE         "1" builds the deterministic e2e binary
+#   POCKETJS_AUDIO_CAPTURE  "1" mounts the 3DS microphone API
 #   POCKETJS_CAPTURE_INPUT   baked input tape, "frame:mask,frame:mask"
 #   POCKETJS_CAPTURE_TOUCH   baked touch tape, "frame:id,x,y@frame:-"
 #   POCKETJS_CAP_START       first frame to dump
@@ -94,6 +95,11 @@ ifeq ($(POCKETJS_MEDIA),1)
 CFLAGS += -DPOCKETJS_MEDIA
 endif
 
+ifeq ($(POCKETJS_AUDIO_CAPTURE),1)
+CFLAGS += -DPOCKETJS_AUDIO_CAPTURE
+OBJECTS += $(BUILD)/microphone.o
+endif
+
 ifeq ($(POCKETJS_CAPTURE),1)
 CFLAGS += -DPOCKETJS_CAPTURE \
   -DPOCKETJS_CAPTURE_INPUT='"$(POCKETJS_CAPTURE_INPUT)"' \
@@ -152,6 +158,7 @@ $(BUILD)/%.o: $(SOURCE)/%.c $(BUILD)/vshader_shbin.h $(FLAGS_STAMP) | $(BUILD)
 
 $(BUILD)/offload.o: $(SOURCE)/offload.h $(SOURCE)/offload_queue.h
 $(BUILD)/qjs.o: $(SOURCE)/offload.h $(SOURCE)/offload_coverage.h
+$(BUILD)/qjs.o: $(SOURCE)/microphone.h
 $(BUILD)/media.o: $(SOURCE)/media.h $(SOURCE)/media_wire.h $(SOURCE)/media_adpcm.h
 $(BUILD)/audio_mod.o: $(SOURCE)/audio_mod.h
 $(BUILD)/main.o $(BUILD)/qjs.o $(BUILD)/gfx.o: $(SOURCE)/media.h

@@ -179,6 +179,9 @@ export const POCKET_CAPABILITIES = defineCapabilityRegistry([
   // appends the id to its profile only when its native host ships the module
   // (the ring/thread discipline to copy is hosts/psp/src/audio.rs).
   "audio.pcm",
+  // Signed 16-bit mono microphone samples from the host. Capture is an
+  // input contract, separate from audio.pcm's playback stream.
+  "audio.capture",
   // Native encoded-media playback with bounded worker handoff, audio clock,
   // pause/volume, texture output and observable decoder availability.
   "media.playback",

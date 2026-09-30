@@ -45,6 +45,7 @@ export const THREE_DS_DEV_CONTRACTS = definePlatformContractRegistry(
         "io.offload",
         "media.playback",
         "audio.pcm",
+        "audio.capture",
         "input.analog.left",
         "input.analog.right",
         "input.buttons",

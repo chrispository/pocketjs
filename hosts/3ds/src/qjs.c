@@ -23,6 +23,9 @@
 #include "media.h"
 #include "audio_mod.h"
 #include "offload_coverage.h"
+#ifdef POCKETJS_AUDIO_CAPTURE
+#include "microphone.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -56,6 +59,9 @@ typedef enum {
   HostAudioCreateStream, HostAudioDestroyStream, HostAudioWritePcm,
   HostAudioPlay, HostAudioPause, HostAudioStop, HostAudioSetVolume,
   HostAudioEndStream, HostAudioPoll,
+#ifdef POCKETJS_AUDIO_CAPTURE
+  HostMicrophoneStart, HostMicrophoneRead, HostMicrophoneStop,
+#endif
   HostOffloadSession, HostOffloadSubmit, HostOffloadTake, HostOffloadCoverage,
   HostCreateNode,
   HostDestroyNode,
@@ -321,6 +327,18 @@ static JSValue host_operation(
       if (!audio_mod_poll(event, sizeof(event))) return JS_UNDEFINED;
       return JS_NewString(ctx, event);
     }
+#ifdef POCKETJS_AUDIO_CAPTURE
+    case HostMicrophoneStart:
+      return JS_NewBool(ctx, microphone_capture_start());
+    case HostMicrophoneRead: {
+      uint8_t samples[2048];
+      size_t length = microphone_capture_read(samples, sizeof(samples));
+      return JS_NewArrayBufferCopy(ctx, samples, length);
+    }
+    case HostMicrophoneStop:
+      microphone_capture_stop();
+      return JS_UNDEFINED;
+#endif
     case HostCreateNode:
       return JS_NewInt32(ctx, ui_create_node((uint32_t)argument_int(ctx, argc, argv, 0)));
     case HostDestroyNode:
@@ -705,6 +723,14 @@ static void install_host(void) {
   add_operation(audio, "poll", 0, HostAudioPoll);
   JS_SetPropertyStr(context, global, "audio", audio);
 
+#ifdef POCKETJS_AUDIO_CAPTURE
+  JSValue microphone = JS_NewObject(context);
+  add_operation(microphone, "start", 0, HostMicrophoneStart);
+  add_operation(microphone, "read", 0, HostMicrophoneRead);
+  add_operation(microphone, "stop", 0, HostMicrophoneStop);
+  JS_SetPropertyStr(context, global, "microphone", microphone);
+#endif
+
 #ifdef POCKETJS_OFFLOAD
   JSValue offload = JS_NewObject(context);
   add_operation(offload, "uploadCoverage", 6, HostOffloadCoverage);
@@ -975,6 +1001,9 @@ const char *qjs_last_error(void) {
 
 void qjs_shutdown(void) {
   audio_mod_forget_guest();
+#ifdef POCKETJS_AUDIO_CAPTURE
+  microphone_capture_shutdown();
+#endif
 #ifdef POCKETJS_MEDIA
   media_forget_guest();
 #endif
