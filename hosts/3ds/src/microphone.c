@@ -15,7 +15,7 @@ static bool sampling;
 
 bool microphone_capture_start(void) {
   if (sampling) return true;
-  if (shared_memory == NULL) shared_memory = linearAlloc(MIC_SHARED_BYTES);
+  if (shared_memory == NULL) shared_memory = linearMemAlign(MIC_SHARED_BYTES, 0x1000);
   if (shared_memory == NULL) return false;
 
   if (initialized) {
