@@ -6,6 +6,9 @@ bool offload_start(void);
 void offload_stop(void);
 void offload_frame(void);
 void offload_measure(unsigned microseconds);
+/* Per-phase frame cost in microseconds: guest frame, animation tick, draw
+ * list build, GPU submission, and the interval since the previous frame. */
+void offload_measure_phases(unsigned js, unsigned tick, unsigned draw, unsigned gpu, unsigned interval);
 int offload_session(void);
 bool offload_submit(const char *bytes, size_t length);
 size_t offload_take(char *out);

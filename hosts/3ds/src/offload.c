@@ -22,12 +22,25 @@ static _Atomic int connection;
 static _Atomic bool running;
 static Thread worker;
 static unsigned sends, takes;
-static _Atomic unsigned measured_frames, max_us, over_budget;
+static _Atomic unsigned measured_frames, over_budget;
 void offload_measure(unsigned us) {
   atomic_fetch_add_explicit(&measured_frames, 1, memory_order_relaxed);
   if (us > 16667) atomic_fetch_add_explicit(&over_budget, 1, memory_order_relaxed);
-  unsigned previous = atomic_load_explicit(&max_us, memory_order_relaxed);
-  if (us > previous) atomic_store_explicit(&max_us, us, memory_order_relaxed);
+}
+/* Phase costs summed and maxed over one metrics window, then reset by the
+ * worker when it reports. A torn read across phases only blurs one window. */
+enum { PHASE_JS, PHASE_TICK, PHASE_DRAW, PHASE_GPU, PHASE_GAP, PHASES };
+static _Atomic unsigned phase_sum[PHASES], phase_max[PHASES], phase_frames, phase_slow;
+void offload_measure_phases(unsigned js, unsigned tick, unsigned draw, unsigned gpu, unsigned interval) {
+  const unsigned values[PHASES] = { js, tick, draw, gpu, interval };
+  for (int i = 0; i < PHASES; i++) {
+    atomic_fetch_add_explicit(&phase_sum[i], values[i], memory_order_relaxed);
+    if (values[i] > atomic_load_explicit(&phase_max[i], memory_order_relaxed))
+      atomic_store_explicit(&phase_max[i], values[i], memory_order_relaxed);
+  }
+  atomic_fetch_add_explicit(&phase_frames, 1, memory_order_relaxed);
+  /* 1.5 frames at 60 Hz: the frame missed its vblank. */
+  if (interval > 25000) atomic_fetch_add_explicit(&phase_slow, 1, memory_order_relaxed);
 }
 static OffloadRecord ui_record;
 
@@ -104,10 +117,23 @@ static void serve(void *unused) {
     while (alive && atomic_load(&running)) {
       if (osGetTime() - metrics_at >= 2000) {
         metrics_at = osGetTime();
+        unsigned mean[PHASES], peak[PHASES];
+        unsigned n = atomic_exchange(&phase_frames, 0), slow = atomic_exchange(&phase_slow, 0);
+        for (int i = 0; i < PHASES; i++) {
+          unsigned sum = atomic_exchange(&phase_sum[i], 0);
+          mean[i] = n ? sum / n : 0; peak[i] = atomic_exchange(&phase_max[i], 0);
+        }
+        /* The companion rejects a metrics payload over 160 characters; the
+         * window's phases are mean/max microseconds. */
+        char payload[161];
+        snprintf(payload, sizeof payload,
+          "frames=%u over16ms=%u n=%u slow=%u js=%u/%u tick=%u/%u draw=%u/%u gpu=%u/%u gap=%u/%u",
+          atomic_load(&measured_frames), atomic_load(&over_budget), n, slow,
+          mean[PHASE_JS], peak[PHASE_JS], mean[PHASE_TICK], peak[PHASE_TICK], mean[PHASE_DRAW], peak[PHASE_DRAW],
+          mean[PHASE_GPU], peak[PHASE_GPU], mean[PHASE_GAP], peak[PHASE_GAP]);
         char metrics[256];
         int size = snprintf(metrics, sizeof metrics,
-          "{\"v\":1,\"id\":0,\"method\":\"offload.metrics\",\"payload\":\"frames=%u maxCpuUs=%u over16ms=%u\"}",
-          atomic_load(&measured_frames), atomic_load(&max_us), atomic_load(&over_budget));
+          "{\"v\":1,\"id\":0,\"method\":\"offload.metrics\",\"payload\":\"%s\"}", payload);
         alive = send_record(fd, metrics, (uint32_t)size);
         if (!alive) break;
       }

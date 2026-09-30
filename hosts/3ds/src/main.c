@@ -571,7 +571,7 @@ static void accept_guest(
   devserver_report_install("accepted", accepted_hash, "first PICA command list retired");
 }
 
-#if !defined(POCKETJS_CAPTURE) && !defined(POCKETJS_OFFLOAD)
+#if !defined(POCKETJS_CAPTURE) || defined(POCKETJS_OFFLOAD)
 /* System ticks to microseconds, saturated to 32 bits. */
 static uint32_t ticks_to_us(u64 ticks) {
   u64 us = ticks * 1000000 / SYSCLOCK_ARM11;
@@ -987,6 +987,24 @@ int main(void) {
     gfx_draw_surface(1);
     C3D_FrameEnd(0);
     offload_measure((unsigned)((offload_ui_ticks + svcGetSystemTick() - offload_cpu_start) * 1000000 / SYSCLOCK_ARM11));
+#ifdef POCKETJS_OFFLOAD
+    {
+      /* The dev server's phase timings are compiled out of this build; the
+       * offload metrics carry the same split to the companion instead. */
+      static u64 previous_js;
+      static bool measured;
+      u64 phase_end = svcGetSystemTick();
+      offload_measure_phases(
+        ticks_to_us(phase_tick - phase_js),
+        ticks_to_us(phase_draw - phase_tick),
+        ticks_to_us(phase_draw_end - phase_draw),
+        ticks_to_us(phase_end - phase_gpu),
+        measured ? ticks_to_us(phase_js - previous_js) : 0
+      );
+      previous_js = phase_js;
+      measured = true;
+    }
+#endif
 #if !defined(POCKETJS_CAPTURE) && !defined(POCKETJS_OFFLOAD)
     {
       /* A frame interval is measured only between consecutive presented
