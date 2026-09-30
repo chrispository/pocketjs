@@ -1,8 +1,8 @@
 #include "microphone.h"
 
 #include <3ds.h>
-#include <3ds/allocator/linear.h>
 #include <3ds/services/mic.h>
+#include <malloc.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -15,7 +15,9 @@ static bool sampling;
 
 bool microphone_capture_start(void) {
   if (sampling) return true;
-  if (shared_memory == NULL) shared_memory = linearMemAlign(MIC_SHARED_BYTES, 0x1000);
+  /* MIC maps this region as a shared-memory block. Use a page-aligned regular
+   * heap allocation; the separate linear heap is reserved for DMA/GPU users. */
+  if (shared_memory == NULL) shared_memory = memalign(0x1000, MIC_SHARED_BYTES);
   if (shared_memory == NULL) return false;
 
   if (initialized) {
@@ -76,7 +78,7 @@ void microphone_capture_shutdown(void) {
     initialized = false;
   }
   if (shared_memory != NULL) {
-    linearFree(shared_memory);
+    free(shared_memory);
     shared_memory = NULL;
   }
   read_offset = 0;
