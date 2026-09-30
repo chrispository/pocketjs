@@ -1005,6 +1005,24 @@ int main(void) {
       measured = true;
     }
 #endif
+#if !defined(POCKETJS_CAPTURE) || defined(POCKETJS_OFFLOAD)
+    {
+      /* Collect garbage once the user has been idle for 1.5 s: no button,
+       * no touch, and guest frames light enough that no output is being
+       * drawn. The pass then falls between keystrokes; activity re-arms it. */
+      static unsigned idle_frames;
+      static bool collected;
+      if (buttons != 0 || touch_count > 0 || ticks_to_us(phase_tick - phase_js) > 5000) {
+        idle_frames = 0;
+        collected = false;
+      } else if (!collected && ++idle_frames >= 90) {
+        collected = true;
+        u64 gc_start = svcGetSystemTick();
+        qjs_collect();
+        offload_measure_gc(ticks_to_us(svcGetSystemTick() - gc_start));
+      }
+    }
+#endif
 #if !defined(POCKETJS_CAPTURE) && !defined(POCKETJS_OFFLOAD)
     {
       /* A frame interval is measured only between consecutive presented

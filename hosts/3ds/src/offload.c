@@ -30,7 +30,10 @@ void offload_measure(unsigned us) {
 /* Phase costs summed and maxed over one metrics window, then reset by the
  * worker when it reports. A torn read across phases only blurs one window. */
 enum { PHASE_JS, PHASE_TICK, PHASE_DRAW, PHASE_GPU, PHASE_GAP, PHASES };
-static _Atomic unsigned phase_sum[PHASES], phase_max[PHASES], phase_frames, phase_slow;
+static _Atomic unsigned phase_sum[PHASES], phase_max[PHASES], phase_frames, phase_slow, gc_max;
+void offload_measure_gc(unsigned us) {
+  if (us > atomic_load_explicit(&gc_max, memory_order_relaxed)) atomic_store_explicit(&gc_max, us, memory_order_relaxed);
+}
 void offload_measure_phases(unsigned js, unsigned tick, unsigned draw, unsigned gpu, unsigned interval) {
   const unsigned values[PHASES] = { js, tick, draw, gpu, interval };
   for (int i = 0; i < PHASES; i++) {
@@ -127,10 +130,10 @@ static void serve(void *unused) {
          * window's phases are mean/max microseconds. */
         char payload[161];
         snprintf(payload, sizeof payload,
-          "frames=%u over16ms=%u n=%u slow=%u js=%u/%u tick=%u/%u draw=%u/%u gpu=%u/%u gap=%u/%u",
+          "frames=%u over16ms=%u n=%u slow=%u js=%u/%u tick=%u/%u draw=%u/%u gpu=%u/%u gap=%u/%u gc=%u",
           atomic_load(&measured_frames), atomic_load(&over_budget), n, slow,
           mean[PHASE_JS], peak[PHASE_JS], mean[PHASE_TICK], peak[PHASE_TICK], mean[PHASE_DRAW], peak[PHASE_DRAW],
-          mean[PHASE_GPU], peak[PHASE_GPU], mean[PHASE_GAP], peak[PHASE_GAP]);
+          mean[PHASE_GPU], peak[PHASE_GPU], mean[PHASE_GAP], peak[PHASE_GAP], atomic_exchange(&gc_max, 0));
         char metrics[256];
         int size = snprintf(metrics, sizeof metrics,
           "{\"v\":1,\"id\":0,\"method\":\"offload.metrics\",\"payload\":\"%s\"}", payload);

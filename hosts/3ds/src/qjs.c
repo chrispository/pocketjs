@@ -111,6 +111,8 @@ typedef enum {
   HostPhysicsQuery,
 } HostOperation;
 
+/* Heap growth allowed before QuickJS collects on its own. */
+#define QJS_GC_HEADROOM ((size_t)4 * 1024 * 1024)
 static JSRuntime *runtime;
 static JSContext *context;
 static JSValue global;
@@ -909,6 +911,12 @@ bool qjs_boot(
     return false;
   }
   JS_SetMaxStackSize(runtime, POCKETJS_JS_STACK_SIZE);
+  /* QuickJS starts collecting at 256 KiB and then whenever the heap
+   * reaches 1.5x its size after the last pass. Each pass walks every live
+   * object — 100-400 ms on the ARM11 for a terminal's history and reactive
+   * graph — so it fell mid-typing. Automatic collection keeps a wide margin
+   * and qjs_collect runs the pass while the user is idle. */
+  JS_SetGCThreshold(runtime, QJS_GC_HEADROOM);
   context = JS_NewContext(runtime);
   if (context == NULL) {
     set_error("JS_NewContext returned null");
@@ -993,6 +1001,14 @@ bool qjs_frame(
   /* Leak guard: the return value is freed every frame. */
   JS_FreeValue(context, result);
   return drain_jobs();
+}
+
+void qjs_collect(void) {
+  if (runtime == NULL) return;
+  JS_RunGC(runtime);
+  JSMemoryUsage usage;
+  JS_ComputeMemoryUsage(runtime, &usage);
+  JS_SetGCThreshold(runtime, (size_t)usage.malloc_size + QJS_GC_HEADROOM);
 }
 
 const char *qjs_last_error(void) {

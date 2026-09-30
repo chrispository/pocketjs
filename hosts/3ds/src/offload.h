@@ -9,6 +9,8 @@ void offload_measure(unsigned microseconds);
 /* Per-phase frame cost in microseconds: guest frame, animation tick, draw
  * list build, GPU submission, and the interval since the previous frame. */
 void offload_measure_phases(unsigned js, unsigned tick, unsigned draw, unsigned gpu, unsigned interval);
+/* Duration of an idle-time garbage collection, in microseconds. */
+void offload_measure_gc(unsigned microseconds);
 int offload_session(void);
 bool offload_submit(const char *bytes, size_t length);
 size_t offload_take(char *out);

@@ -29,6 +29,10 @@ bool qjs_frame(
   size_t touch_count,
   int32_t right_analog
 );
+/* Run a full cycle collection now and give automatic collection fresh
+ * headroom. The host calls it while the user is idle, so the pause lands
+ * between keystrokes rather than on one. */
+void qjs_collect(void);
 const char *qjs_last_error(void);
 void qjs_shutdown(void);
 
