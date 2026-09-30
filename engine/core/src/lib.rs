@@ -1299,6 +1299,21 @@ impl Ui {
     /// Advance one frame: tick animations by exactly one `set_tick_rate`
     /// step, step physics worlds against current layout, then re-run layout
     /// if dirty. Call once per vblank, BEFORE `draw()`.
+    /// Whether the next frame can differ from this one with no mutating
+    /// call in between: a running animation, timeline or physics body, an
+    /// auto-played sprite, or the DevTools highlight glide. A host that
+    /// reuses its last DrawList while nothing was mutated must rebuild while
+    /// this holds, and on the tick that ends it.
+    pub fn draw_is_live(&self) -> bool {
+        self.inspect_id != 0
+            || self.anims.tracks.iter().any(|t| t.alive)
+            || self.timelines.iter().any(|t| t.alive)
+            || !self.physics.is_idle()
+            || self.tree.slots.iter().any(|n| {
+                n.node_type == spec::NodeType::Image as u8 && n.tex >= 0 && n.sprite_frames > 1
+            })
+    }
+
     pub fn tick(&mut self) {
         self.ticked = true;
         if self.paused {

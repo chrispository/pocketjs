@@ -45,6 +45,13 @@ static mut DRAW_PTR: *const u32 = core::ptr::null();
 static mut DRAW_LEN: usize = 0;
 static mut AUX_DRAW_PTR: *const u32 = core::ptr::null();
 static mut AUX_DRAW_LEN: usize = 0;
+/// Whether anything that can change a DrawList has happened since each was
+/// last built. Every entry point reaches the Ui through `ui()`, which sets
+/// both; only the calls known to leave the picture alone use `ui_read()`.
+/// A frame with nothing mutated and nothing animating reuses the last list:
+/// rebuilding a full terminal screen cost the ARM11 7-9 ms every idle frame.
+static mut DRAW_DIRTY: bool = true;
+static mut AUX_DRAW_DIRTY: bool = true;
 
 /// `ui:img.<name>` and `ui:sprite.<name>` registrations from the last
 /// `ui_feed_pak`, in pak order. The host publishes them as `ui.__textures` /
@@ -112,7 +119,24 @@ pub struct PocketFontAtlas {
 
 #[inline]
 fn ui() -> &'static mut Ui {
+    mark_draw_dirty();
+    ui_read()
+}
+
+/// The Ui without marking the DrawLists stale: queries, hit tests and the
+/// draw calls themselves. Hit tests may relayout, but only for a mutation
+/// that already marked the lists.
+#[inline]
+fn ui_read() -> &'static mut Ui {
     unsafe { UI.get_or_insert_with(Ui::new) }
+}
+
+#[inline]
+fn mark_draw_dirty() {
+    unsafe {
+        DRAW_DIRTY = true;
+        AUX_DRAW_DIRTY = true;
+    }
 }
 
 #[inline]
@@ -241,12 +265,12 @@ pub extern "C" fn ui_set_viewport(width: f32, height: f32) {
 
 #[no_mangle]
 pub extern "C" fn ui_viewport_width() -> u32 {
-    ui().viewport().0 as u32
+    ui_read().viewport().0 as u32
 }
 
 #[no_mangle]
 pub extern "C" fn ui_viewport_height() -> u32 {
-    ui().viewport().1 as u32
+    ui_read().viewport().1 as u32
 }
 
 #[no_mangle]
@@ -258,17 +282,17 @@ pub extern "C" fn ui_create_auxiliary_surface(width: f32, height: f32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn ui_auxiliary_surface_root() -> i32 {
-    ui().auxiliary_surface_root()
+    ui_read().auxiliary_surface_root()
 }
 
 #[no_mangle]
 pub extern "C" fn ui_auxiliary_viewport_width() -> u32 {
-    ui().auxiliary_viewport().map_or(0, |viewport| viewport.0 as u32)
+    ui_read().auxiliary_viewport().map_or(0, |viewport| viewport.0 as u32)
 }
 
 #[no_mangle]
 pub extern "C" fn ui_auxiliary_viewport_height() -> u32 {
-    ui().auxiliary_viewport().map_or(0, |viewport| viewport.1 as u32)
+    ui_read().auxiliary_viewport().map_or(0, |viewport| viewport.1 as u32)
 }
 
 /// Optional C-side scratch allocation out of the Rust heap. The caller must
@@ -370,7 +394,7 @@ pub extern "C" fn ui_physics_destroy(handle: i32) {
 #[no_mangle]
 pub extern "C" fn ui_physics_take_events(length: *mut usize) -> *const u8 {
     unsafe {
-        ui().physics_take_events(&mut PHYSICS_EVENTS);
+        ui_read().physics_take_events(&mut PHYSICS_EVENTS);
         if !length.is_null() {
             *length = PHYSICS_EVENTS.len() * 8;
         }
@@ -380,7 +404,7 @@ pub extern "C" fn ui_physics_take_events(length: *mut usize) -> *const u8 {
 
 #[no_mangle]
 pub extern "C" fn ui_physics_query(query: u32, handle: i32, a: f64, b: f64, c: f64, d: f64) -> f64 {
-    ui().physics_query(query, handle, a, b, c, d)
+    ui_read().physics_query(query, handle, a, b, c, d)
 }
 
 #[no_mangle]
@@ -459,22 +483,22 @@ pub extern "C" fn ui_set_active(id: i32, active: i32) {
 
 #[no_mangle]
 pub extern "C" fn ui_hit_test(x: f32, y: f32) -> i32 {
-    ui().hit_test(x, y)
+    ui_read().hit_test(x, y)
 }
 
 #[no_mangle]
 pub extern "C" fn ui_hit_test_bounds(x: f32, y: f32) -> i32 {
-    ui().hit_test_bounds(x, y)
+    ui_read().hit_test_bounds(x, y)
 }
 
 #[no_mangle]
 pub extern "C" fn ui_hit_test_auxiliary(x: f32, y: f32) -> i32 {
-    ui().hit_test_auxiliary(x, y)
+    ui_read().hit_test_auxiliary(x, y)
 }
 
 #[no_mangle]
 pub extern "C" fn ui_hit_test_bounds_auxiliary(x: f32, y: f32) -> i32 {
-    ui().hit_test_bounds_auxiliary(x, y)
+    ui_read().hit_test_bounds_auxiliary(x, y)
 }
 
 #[no_mangle]
@@ -490,7 +514,7 @@ pub extern "C" fn ui_touch_hits_auxiliary(
         unsafe { core::slice::from_raw_parts(packed, length.min(8)) }
     };
     let mut hits = [0i32; 8];
-    let count = ui().touch_hits_auxiliary(contacts, &mut hits);
+    let count = ui_read().touch_hits_auxiliary(contacts, &mut hits);
     let written = count.min(out_length);
     if !out.is_null() && written > 0 {
         unsafe { core::ptr::copy_nonoverlapping(hits.as_ptr(), out, written) };
@@ -520,14 +544,20 @@ pub extern "C" fn ui_load_font_atlas(ptr: *const u8, len: usize) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn ui_measure_text(ptr: *const u8, len: usize, font_slot: u32) -> f32 {
-    ui().measure_text(unsafe { &text_lossy(ptr, len) }, font_slot as u8)
+    ui_read().measure_text(unsafe { &text_lossy(ptr, len) }, font_slot as u8)
 }
 
 // ---- fixed-step frame and DrawList -----------------------------------------
 
 #[no_mangle]
 pub extern "C" fn ui_tick() {
-    ui().tick();
+    // The tick that finishes an animation still changes the picture, so
+    // liveness before the tick counts as well as after it.
+    let live = ui_read().draw_is_live();
+    ui_read().tick();
+    if live || ui_read().draw_is_live() {
+        mark_draw_dirty();
+    }
 }
 
 /// Build this frame's DrawList and return its length in words.
@@ -537,7 +567,13 @@ pub extern "C" fn ui_tick() {
 /// refreshes what `ui_draw_list_ptr`/`ui_draw_list_len` report.
 #[no_mangle]
 pub extern "C" fn ui_draw() -> usize {
-    let words = &ui().draw().words;
+    unsafe {
+        if !DRAW_DIRTY && !DRAW_PTR.is_null() {
+            return DRAW_LEN;
+        }
+        DRAW_DIRTY = false;
+    }
+    let words = &ui_read().draw().words;
     unsafe {
         DRAW_PTR = words.as_ptr();
         DRAW_LEN = words.len();
@@ -559,7 +595,13 @@ pub extern "C" fn ui_draw_list_len() -> usize {
 
 #[no_mangle]
 pub extern "C" fn ui_draw_auxiliary() -> usize {
-    let Some(draw_list) = ui().draw_auxiliary() else {
+    unsafe {
+        if !AUX_DRAW_DIRTY && !AUX_DRAW_PTR.is_null() {
+            return AUX_DRAW_LEN;
+        }
+        AUX_DRAW_DIRTY = false;
+    }
+    let Some(draw_list) = ui_read().draw_auxiliary() else {
         unsafe {
             AUX_DRAW_PTR = core::ptr::null();
             AUX_DRAW_LEN = 0;
@@ -613,7 +655,7 @@ pub extern "C" fn ui_draw_hash() -> u64 {
 /// `ui_texture_at`.
 #[no_mangle]
 pub extern "C" fn ui_texture_slot_count() -> usize {
-    ui().texture_slot_count()
+    ui_read().texture_slot_count()
 }
 
 /// Mask that turns a DrawList texture handle into its slot index
@@ -631,7 +673,7 @@ pub extern "C" fn ui_texture_at(slot: u32, out: *mut PocketTexture) -> i32 {
     if out.is_null() {
         return 0;
     }
-    let Some((handle, revision, view)) = ui().texture_at_versioned(slot) else {
+    let Some((handle, revision, view)) = ui_read().texture_at_versioned(slot) else {
         return 0;
     };
     unsafe {
@@ -664,7 +706,7 @@ pub extern "C" fn ui_font_atlas(slot: u32, out: *mut PocketFontAtlas) -> i32 {
     if out.is_null() || slot >= spec::MAX_FONT_SLOTS as u32 {
         return 0;
     }
-    let Some(atlas) = ui().font_atlas(slot as u8) else {
+    let Some(atlas) = ui_read().font_atlas(slot as u8) else {
         return 0;
     };
     unsafe {
@@ -867,12 +909,12 @@ pub extern "C" fn ui_debug_inspect(id: i32) {
 
 #[no_mangle]
 pub extern "C" fn ui_debug_rect_xy() -> i32 {
-    ui().debug_rect_xy()
+    ui_read().debug_rect_xy()
 }
 
 #[no_mangle]
 pub extern "C" fn ui_debug_rect_wh() -> i32 {
-    ui().debug_rect_wh()
+    ui_read().debug_rect_wh()
 }
 
 #[no_mangle]
